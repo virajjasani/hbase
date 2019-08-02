@@ -1531,6 +1531,67 @@ module Hbase
     def stop_regionserver(hostport)
       @admin.stopRegionServer(hostport)
     end
+
+    def get_regions_for_table_and_server(table_name, server_name)
+      get_regions_for_server(get_regions_for_table(table_name), server_name)
+    end
+
+    def get_regions_for_server(regions_for_table, server_name)
+      regions_for_table.select do |hregion|
+        accept_server_name? server_name, hregion.getServerName.toString
+      end
+    end
+
+    def get_regions_for_table(table_name)
+      @connection.getRegionLocator(TableName.valueOf(table_name)).getAllRegionLocations.to_a
+    end
+
+    def accept_server_name?(desired_server_name, actual_server_name)
+      desired_server_name.nil? || actual_server_name.start_with?(desired_server_name)
+    end
+
+    def get_region_info(server_name, region_name)
+      server_metrics_map = @admin.getClusterMetrics.getLiveServerMetrics
+      server_metrics = server_metrics_map.get(server_name)
+      if server_metrics.nil?
+        region_metrics_map = java.util.HashMap.new
+      else
+        region_metrics_map = server_metrics.getRegionMetrics
+      end
+      region_metrics_map.get(region_name)
+    end
+
+    def get_region_data_locality(region_metrics)
+      region_metrics.getDataLocality
+    end
+
+    def get_region_data_locality_str(region_metrics)
+      if region_metrics.nil?
+        locality = ''
+      else
+        locality = get_region_data_locality(region_metrics).to_s.strip
+      end
+      locality
+    end
+
+    def get_region_store_file_size(region_metrics)
+      if region_metrics.nil?
+        region_store_file_size = ''
+      else
+        region_store_file_size = region_metrics.getStoreFileSize.to_s.strip
+      end
+      region_store_file_size
+    end
+
+    def get_region_requests(region_metrics)
+      if region_metrics.nil?
+        region_requests = ''
+      else
+        region_requests = region_metrics.getRequestCount.to_s.strip
+      end
+      region_requests
+    end
+
   end
   # rubocop:enable Metrics/ClassLength
 end

@@ -79,17 +79,12 @@ EOF
           raise "#{cols} must be an array of strings. Possible values are SERVER_NAME, REGION_NAME, START_KEY, END_KEY, SIZE, REQ, LOCALITY."
         end
 
-        admin_instance = admin.instance_variable_get('@admin')
-        conn_instance = admin_instance.getConnection
-        cluster_metrics = admin_instance.getClusterMetrics
-        hregion_locator_instance = conn_instance.getRegionLocator(TableName.valueOf(table_name))
-        hregion_locator_list = hregion_locator_instance.getAllRegionLocations.to_a
         results = []
         desired_server_name = options[SERVER_NAME]
 
         begin
           # Filter out region servers which we don't want, default to all RS
-          regions = get_regions_for_table_and_server(table_name, conn_instance, desired_server_name)
+          regions = admin.get_regions_for_table_and_server(table_name, desired_server_name)
           # A locality threshold of "1.0" would be all regions (cannot have greater than 1 locality)
           # Regions which have a `dataLocality` less-than-or-equal to this value are accepted
           locality_threshold = 1.0
@@ -104,24 +99,17 @@ EOF
           regions.each do |hregion|
             hregion_info = hregion.getRegion
             server_name = hregion.getServerName
-            server_metrics_map = cluster_metrics.getLiveServerMetrics
-            server_metrics = server_metrics_map.get(server_name)
-            if server_metrics.nil?
-              region_metrics_map = java.util.HashMap.new
-            else
-              region_metrics_map = server_metrics.getRegionMetrics
-            end
             region_name = hregion_info.getRegionNameAsString
-            region_metrics = region_metrics_map.get(hregion_info.getRegionName)
+            region_details = admin.get_region_info(server_name, hregion_info.getRegionName)
 
-            if region_metrics.nil?
+            if region_details.nil?
               puts "Can not find all details for region: " \
                    "#{region_name.strip} ," \
                    " it may be disabled or in transition\n"
             else
               # Ignore regions which exceed our locality threshold
-              next unless accept_region_for_locality? region_metrics.getDataLocality,
-                                                      locality_threshold
+              next unless accept_region_for_locality? admin.
+                  get_region_data_locality(region_details), locality_threshold
             end
             result_hash = {}
 
@@ -148,39 +136,25 @@ EOF
             end
 
             if size_hash.key?('SIZE')
-              if region_metrics.nil?
-                region_store_file_size = ''
-              else
-                region_store_file_size = region_metrics.getStoreFileSize.to_s.strip
-              end
+              region_store_file_size = admin.get_region_store_file_size(region_details)
               result_hash.store('SIZE', region_store_file_size)
               size_hash['SIZE'] = [size_hash['SIZE'], region_store_file_size.length].max
             end
 
             if size_hash.key?('REQ')
-              if region_metrics.nil?
-                region_requests = ''
-              else
-                region_requests = region_metrics.getRequestCount.to_s.strip
-              end
+              region_requests = admin.get_region_requests(region_details)
               result_hash.store('REQ', region_requests)
               size_hash['REQ'] = [size_hash['REQ'], region_requests.length].max
             end
 
             if size_hash.key?('LOCALITY')
-              if region_metrics.nil?
-                locality = ''
-              else
-                locality = region_metrics.getDataLocality.to_s.strip
-              end
+              locality = admin.get_region_data_locality_str(region_details)
               result_hash.store('LOCALITY', locality)
               size_hash['LOCALITY'] = [size_hash['LOCALITY'], locality.length].max
             end
 
             results << result_hash
           end
-        ensure
-          hregion_locator_instance.close
         end
 
         @end_time = Time.now
@@ -208,24 +182,6 @@ EOF
 
       def valid_locality_threshold?(value)
         value >= 0 && value <= 1.0
-      end
-
-      def get_regions_for_table_and_server(table_name, conn, server_name)
-        get_regions_for_server(get_regions_for_table(table_name, conn), server_name)
-      end
-
-      def get_regions_for_server(regions_for_table, server_name)
-        regions_for_table.select do |hregion|
-          accept_server_name? server_name, hregion.getServerName.toString
-        end
-      end
-
-      def get_regions_for_table(table_name, conn)
-        conn.getRegionLocator(TableName.valueOf(table_name)).getAllRegionLocations.to_a
-      end
-
-      def accept_server_name?(desired_server_name, actual_server_name)
-        desired_server_name.nil? || actual_server_name.start_with?(desired_server_name)
       end
 
       def accept_region_for_locality?(actual_locality, locality_threshold)

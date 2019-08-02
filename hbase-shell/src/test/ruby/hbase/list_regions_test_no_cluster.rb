@@ -41,13 +41,13 @@ module Hbase
 
     define_test 'acceptable_server_names' do
       command = ::Shell::Commands::ListRegions.new(nil)
-      assert command.accept_server_name?('host.domain.com', 'host.domain.com')
-      assert command.accept_server_name?('host.domain', 'host.domain.com')
-      assert command.accept_server_name?('host.dom', 'host.domain.com')
-      assert command.accept_server_name?('host1', 'host1.domain.com')
-      assert_equal false, command.accept_server_name?('host2', 'host1.domain.com')
-      assert_equal false, command.accept_server_name?('host2.domain', 'host1.domain.com')
-      assert_equal false, command.accept_server_name?('host1.niamod', 'host1.domain.com')
+      assert command.admin.accept_server_name?('host.domain.com', 'host.domain.com')
+      assert command.admin.accept_server_name?('host.domain', 'host.domain.com')
+      assert command.admin.accept_server_name?('host.dom', 'host.domain.com')
+      assert command.admin.accept_server_name?('host1', 'host1.domain.com')
+      assert_equal false, command.admin.accept_server_name?('host2', 'host1.domain.com')
+      assert_equal false, command.admin.accept_server_name?('host2.domain', 'host1.domain.com')
+      assert_equal false, command.admin.accept_server_name?('host1.niamod', 'host1.domain.com')
     end
 
     define_test 'valid_region_localities' do
@@ -60,16 +60,6 @@ module Hbase
       assert_equal false, command.accept_region_for_locality?(1.0, 0.8)
       assert_equal false, command.accept_region_for_locality?(1.0, 0.999)
       assert_equal false, command.accept_region_for_locality?(0.5, 0.3)
-    end
-
-    define_test 'filter nondesired servers' do
-      command = ::Shell::Commands::ListRegions.new(nil)
-      server1 = create_region_location('server1,16020,1234')
-      server2 = create_region_location('server2,16020,1234')
-      server3 = create_region_location('server3,16020,1234')
-      assert_equal [server2], command.get_regions_for_server([server1, server2, server3], 'server2')
-      assert_equal [server3], command.get_regions_for_server([server1, server2, server3], 'server3')
-      assert_equal [], command.get_regions_for_server([server1, server2, server3], 'server5')
     end
 
     def create_region_location(server_name)

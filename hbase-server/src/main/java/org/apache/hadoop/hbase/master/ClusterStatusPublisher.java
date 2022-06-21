@@ -134,7 +134,7 @@ public class ClusterStatusPublisher extends ScheduledChore {
 
   @Override
   protected void chore() {
-    if (!connected) {
+    if (!isConnected()) {
       return;
     }
 
@@ -170,6 +170,10 @@ public class ClusterStatusPublisher extends ScheduledChore {
     publisher.close();
   }
 
+  private synchronized boolean isConnected() {
+    return this.connected;
+  }
+
   /**
    * Create the dead server to send. A dead server is sent NB_SEND times. We send at max
    * MAX_SERVER_PER_MESSAGE at a time. if there are too many dead servers, we send the newly
@@ -183,8 +187,7 @@ public class ClusterStatusPublisher extends ScheduledChore {
     }
 
     // We're sending the new deads first.
-    List<Map.Entry<ServerName, Integer>> entries = new ArrayList<>();
-    entries.addAll(lastSent.entrySet());
+    List<Map.Entry<ServerName, Integer>> entries = new ArrayList<>(lastSent.entrySet());
     Collections.sort(entries, new Comparator<Map.Entry<ServerName, Integer>>() {
       @Override
       public int compare(Map.Entry<ServerName, Integer> o1, Map.Entry<ServerName, Integer> o2) {

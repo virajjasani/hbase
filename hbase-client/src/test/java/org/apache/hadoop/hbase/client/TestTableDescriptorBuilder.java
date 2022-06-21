@@ -24,8 +24,9 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.util.regex.Pattern;
-import org.apache.hadoop.hbase.*;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
@@ -40,11 +41,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Test setting values in the descriptor
+ * Test setting values in the descriptor.
  */
 @Category({MiscTests.class, SmallTests.class})
 public class TestTableDescriptorBuilder {
-
   @ClassRule
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestTableDescriptorBuilder.class);
@@ -59,47 +59,9 @@ public class TestTableDescriptorBuilder {
     String cpName = "a.b.c.d";
     TableDescriptor htd
       = TableDescriptorBuilder.newBuilder(TableName.META_TABLE_NAME)
-            .addCoprocessor(cpName)
-            .addCoprocessor(cpName)
+            .setCoprocessor(cpName)
+            .setCoprocessor(cpName)
             .build();
-  }
-
-  @Test
-  public void testAddCoprocessorWithSpecStr() throws IOException {
-    String cpName = "a.b.c.d";
-    TableDescriptorBuilder builder
-      = TableDescriptorBuilder.newBuilder(TableName.META_TABLE_NAME);
-
-    try {
-      builder.addCoprocessorWithSpec(cpName);
-      fail();
-    } catch (IllegalArgumentException iae) {
-      // Expected as cpName is invalid
-    }
-
-    // Try minimal spec.
-    try {
-      builder.addCoprocessorWithSpec("file:///some/path" + "|" + cpName);
-      fail();
-    } catch (IllegalArgumentException iae) {
-      // Expected to be invalid
-    }
-
-    // Try more spec.
-    String spec = "hdfs:///foo.jar|com.foo.FooRegionObserver|1001|arg1=1,arg2=2";
-    try {
-      builder.addCoprocessorWithSpec(spec);
-    } catch (IllegalArgumentException iae) {
-      fail();
-    }
-
-    // Try double add of same coprocessor
-    try {
-      builder.addCoprocessorWithSpec(spec);
-      fail();
-    } catch (IOException ioe) {
-      // Expect that the coprocessor already exists
-    }
   }
 
   @Test
@@ -123,8 +85,9 @@ public class TestTableDescriptorBuilder {
   }
 
   /**
-   * Test cps in the table description
-   * @throws Exception
+   * Test cps in the table description.
+   *
+   * @throws Exception if setting a coprocessor fails
    */
   @Test
   public void testGetSetRemoveCP() throws Exception {
@@ -132,7 +95,7 @@ public class TestTableDescriptorBuilder {
     String className = "org.apache.hadoop.hbase.coprocessor.SimpleRegionObserver";
     TableDescriptor desc
       = TableDescriptorBuilder.newBuilder(TableName.valueOf(name.getMethodName()))
-         .addCoprocessor(className) // add and check that it is present
+         .setCoprocessor(className) // add and check that it is present
         .build();
     assertTrue(desc.hasCoprocessor(className));
     desc = TableDescriptorBuilder.newBuilder(desc)
@@ -142,56 +105,62 @@ public class TestTableDescriptorBuilder {
   }
 
   /**
-   * Test cps in the table description
-   * @throws Exception
+   * Test cps in the table description.
+   *
+   * @throws Exception if setting a coprocessor fails
    */
   @Test
   public void testSetListRemoveCP() throws Exception {
     TableDescriptor desc
       = TableDescriptorBuilder.newBuilder(TableName.valueOf(name.getMethodName())).build();
     // Check that any coprocessor is present.
-    assertTrue(desc.getCoprocessors().isEmpty());
+    assertTrue(desc.getCoprocessorDescriptors().isEmpty());
 
     // simple CP
     String className1 = "org.apache.hadoop.hbase.coprocessor.SimpleRegionObserver";
     String className2 = "org.apache.hadoop.hbase.coprocessor.SampleRegionWALObserver";
     desc = TableDescriptorBuilder.newBuilder(desc)
-            .addCoprocessor(className1) // Add the 1 coprocessor and check if present.
+            .setCoprocessor(className1) // Add the 1 coprocessor and check if present.
             .build();
-    assertTrue(desc.getCoprocessors().size() == 1);
-    assertTrue(desc.getCoprocessors().contains(className1));
+    assertTrue(desc.getCoprocessorDescriptors().size() == 1);
+    assertTrue(desc.getCoprocessorDescriptors().stream().map(CoprocessorDescriptor::getClassName)
+      .anyMatch(name -> name.equals(className1)));
 
     desc = TableDescriptorBuilder.newBuilder(desc)
             // Add the 2nd coprocessor and check if present.
             // remove it and check that it is gone
-            .addCoprocessor(className2)
+            .setCoprocessor(className2)
             .build();
-    assertTrue(desc.getCoprocessors().size() == 2);
-    assertTrue(desc.getCoprocessors().contains(className2));
+    assertTrue(desc.getCoprocessorDescriptors().size() == 2);
+    assertTrue(desc.getCoprocessorDescriptors().stream().map(CoprocessorDescriptor::getClassName)
+      .anyMatch(name -> name.equals(className2)));
 
     desc = TableDescriptorBuilder.newBuilder(desc)
             // Remove one and check
             .removeCoprocessor(className1)
             .build();
-    assertTrue(desc.getCoprocessors().size() == 1);
-    assertFalse(desc.getCoprocessors().contains(className1));
-    assertTrue(desc.getCoprocessors().contains(className2));
+    assertTrue(desc.getCoprocessorDescriptors().size() == 1);
+    assertFalse(desc.getCoprocessorDescriptors().stream().map(CoprocessorDescriptor::getClassName)
+      .anyMatch(name -> name.equals(className1)));
+    assertTrue(desc.getCoprocessorDescriptors().stream().map(CoprocessorDescriptor::getClassName)
+      .anyMatch(name -> name.equals(className2)));
 
     desc = TableDescriptorBuilder.newBuilder(desc)
             // Remove the last and check
             .removeCoprocessor(className2)
             .build();
-    assertTrue(desc.getCoprocessors().isEmpty());
-    assertFalse(desc.getCoprocessors().contains(className1));
-    assertFalse(desc.getCoprocessors().contains(className2));
+    assertTrue(desc.getCoprocessorDescriptors().isEmpty());
+    assertFalse(desc.getCoprocessorDescriptors().stream().map(CoprocessorDescriptor::getClassName)
+      .anyMatch(name -> name.equals(className1)));
+    assertFalse(desc.getCoprocessorDescriptors().stream().map(CoprocessorDescriptor::getClassName)
+      .anyMatch(name -> name.equals(className2)));
   }
 
   /**
    * Test that we add and remove strings from settings properly.
-   * @throws Exception
    */
   @Test
-  public void testRemoveString() throws Exception {
+  public void testRemoveString() {
     byte[] key = Bytes.toBytes("Some");
     byte[] value = Bytes.toBytes("value");
     TableDescriptor desc
@@ -205,13 +174,13 @@ public class TestTableDescriptorBuilder {
     assertTrue(desc.getValue(key) == null);
   }
 
-  String legalTableNames[] = { "foo", "with-dash_under.dot", "_under_start_ok",
-      "with-dash.with_underscore", "02-01-2012.my_table_01-02", "xyz._mytable_", "9_9_0.table_02"
-      , "dot1.dot2.table", "new.-mytable", "with-dash.with.dot", "legal..t2", "legal..legal.t2",
-      "trailingdots..", "trailing.dots...", "ns:mytable", "ns:_mytable_", "ns:my_table_01-02"};
-  String illegalTableNames[] = { ".dot_start_illegal", "-dash_start_illegal", "spaces not ok",
-      "-dash-.start_illegal", "new.table with space", "01 .table", "ns:-illegaldash",
-      "new:.illegaldot", "new:illegalcolon1:", "new:illegalcolon1:2"};
+  String[] legalTableNames = { "foo", "with-dash_under.dot", "_under_start_ok",
+    "with-dash.with_underscore", "02-01-2012.my_table_01-02", "xyz._mytable_", "9_9_0.table_02",
+    "dot1.dot2.table", "new.-mytable", "with-dash.with.dot", "legal..t2", "legal..legal.t2",
+    "trailingdots..", "trailing.dots...", "ns:mytable", "ns:_mytable_", "ns:my_table_01-02"};
+  String[] illegalTableNames = { ".dot_start_illegal", "-dash_start_illegal", "spaces not ok",
+    "-dash-.start_illegal", "new.table with space", "01 .table", "ns:-illegaldash",
+    "new:.illegaldot", "new:illegalcolon1:", "new:illegalcolon1:2"};
 
   @Test
   public void testLegalTableNames() {
@@ -291,7 +260,7 @@ public class TestTableDescriptorBuilder {
             .build();
     TableDescriptor htd
       = TableDescriptorBuilder.newBuilder(TableName.valueOf(name.getMethodName()))
-              .addColumnFamily(hcd)
+              .setColumnFamily(hcd)
               .build();
 
     assertEquals(1000, htd.getColumnFamily(familyName).getBlocksize());
@@ -324,14 +293,14 @@ public class TestTableDescriptorBuilder {
             .setBlocksize(1000)
             .build();
     TableDescriptor htd = TableDescriptorBuilder.newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(hcd)
+            .setColumnFamily(hcd)
             .build();
     assertEquals(1000, htd.getColumnFamily(familyName).getBlocksize());
     hcd = ColumnFamilyDescriptorBuilder.newBuilder(familyName)
             .setBlocksize(2000)
             .build();
     // add duplicate column
-    TableDescriptorBuilder.newBuilder(htd).addColumnFamily(hcd).build();
+    TableDescriptorBuilder.newBuilder(htd).setColumnFamily(hcd).build();
   }
 
   @Test
@@ -340,27 +309,5 @@ public class TestTableDescriptorBuilder {
             .setPriority(42)
             .build();
     assertEquals(42, htd.getPriority());
-  }
-
-  @Test
-  public void testSerialReplicationScope() {
-    HColumnDescriptor hcdWithScope = new HColumnDescriptor(Bytes.toBytes("cf0"));
-    hcdWithScope.setScope(HConstants.REPLICATION_SCOPE_SERIAL);
-    HColumnDescriptor hcdWithoutScope = new HColumnDescriptor(Bytes.toBytes("cf1"));
-    TableDescriptor htd = TableDescriptorBuilder.newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(hcdWithoutScope)
-            .build();
-    assertFalse(htd.hasSerialReplicationScope());
-
-    htd = TableDescriptorBuilder.newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(hcdWithScope)
-            .build();
-    assertTrue(htd.hasSerialReplicationScope());
-
-    htd = TableDescriptorBuilder.newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(hcdWithScope)
-            .addColumnFamily(hcdWithoutScope)
-            .build();
-    assertTrue(htd.hasSerialReplicationScope());
   }
 }

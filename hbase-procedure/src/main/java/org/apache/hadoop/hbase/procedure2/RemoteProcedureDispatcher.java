@@ -22,26 +22,23 @@ import java.io.IOException;
 import java.lang.Thread.UncaughtExceptionHandler;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.DelayQueue;
-import java.util.concurrent.Future;
-import java.util.concurrent.FutureTask;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-
 import org.apache.hadoop.conf.Configuration;
-import org.apache.yetus.audience.InterfaceAudience;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.procedure2.util.DelayedUtil;
 import org.apache.hadoop.hbase.procedure2.util.DelayedUtil.DelayedContainerWithTimestamp;
 import org.apache.hadoop.hbase.procedure2.util.DelayedUtil.DelayedWithTimeout;
 import org.apache.hadoop.hbase.procedure2.util.StringUtils;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Threads;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.collect.ArrayListMultimap;
 
@@ -52,7 +49,7 @@ import org.apache.hbase.thirdparty.com.google.common.collect.ArrayListMultimap;
  * <li>Each server queue has a dispatch buffer</li>
  * <li>Once the dispatch buffer reaches a threshold-size/time we send<li>
  * </ul>
- * <p>Call {@link #start()} and then {@link #submitTask(Callable)}. When done,
+ * <p>Call {@link #start()} and then {@link #submitTask(Runnable)}. When done,
  * call {@link #stop()}.
  */
 @InterfaceAudience.Private
@@ -94,8 +91,8 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
       return false;
     }
 
-    LOG.info("Started, threads=" + this.corePoolSize +
-      ", queueMaxSize=" + this.queueMaxSize + ", operationDelay=" + this.operationDelay);
+    LOG.info("Instantiated, coreThreads={} (allowCoreThreadTimeOut=true), queueMaxSize={}, " +
+        "operationDelay={}", this.corePoolSize, this.queueMaxSize, this.operationDelay);
 
     // Create the timeout executor
     timeoutExecutor = new TimeoutExecutorThread();
@@ -139,14 +136,7 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
     }
   }
 
-  protected UncaughtExceptionHandler getUncaughtExceptionHandler() {
-    return new UncaughtExceptionHandler() {
-      @Override
-      public void uncaughtException(Thread t, Throwable e) {
-        LOG.warn("Failed to execute remote procedures " + t.getName(), e);
-      }
-    };
-  }
+  protected abstract UncaughtExceptionHandler getUncaughtExceptionHandler();
 
   // ============================================================================================
   //  Node Helpers
@@ -162,24 +152,36 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
   }
 
   /**
-   * Add a remote rpc. Be sure to check result for successful add.
+   * Add a remote rpc.
    * @param key the node identifier
-   * @return True if we successfully added the operation.
    */
-  public boolean addOperationToNode(final TRemote key, RemoteProcedure rp) {
+  public void addOperationToNode(final TRemote key, RemoteProcedure rp)
+          throws NullTargetServerDispatchException, NoServerDispatchException,
+          NoNodeDispatchException {
     if (key == null) {
-      // Key is remote server name. Be careful. It could have been nulled by a concurrent
-      // ServerCrashProcedure shutting down outstanding RPC requests. See remoteCallFailed.
-      return false;
+      throw new NullTargetServerDispatchException(rp.toString());
     }
-    assert key != null : "found null key for node";
     BufferNode node = nodeMap.get(key);
     if (node == null) {
-      return false;
+      // If null here, it means node has been removed because it crashed. This happens when server
+      // is expired in ServerManager. ServerCrashProcedure may or may not have run.
+      throw new NoServerDispatchException(key.toString() + "; " + rp.toString());
     }
     node.add(rp);
     // Check our node still in the map; could have been removed by #removeNode.
-    return nodeMap.containsValue(node);
+    if (!nodeMap.containsValue(node)) {
+      throw new NoNodeDispatchException(key.toString() + "; " + rp.toString());
+    }
+  }
+
+  public void removeCompletedOperation(final TRemote key, RemoteProcedure rp) {
+    BufferNode node = nodeMap.get(key);
+    if (node == null) {
+      LOG.warn("since no node for this key {}, we can't removed the finished remote procedure",
+        key);
+      return;
+    }
+    node.operationCompleted(rp);
   }
 
   /**
@@ -188,7 +190,10 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
    */
   public boolean removeNode(final TRemote key) {
     final BufferNode node = nodeMap.remove(key);
-    if (node == null) return false;
+    if (node == null) {
+      return false;
+    }
+
     node.abortOperationsInQueue();
     return true;
   }
@@ -196,14 +201,12 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
   // ============================================================================================
   //  Task Helpers
   // ============================================================================================
-  protected Future<Void> submitTask(Callable<Void> task) {
-    return threadPool.submit(task);
+  protected final void submitTask(Runnable task) {
+    threadPool.execute(task);
   }
 
-  protected Future<Void> submitTask(Callable<Void> task, long delay, TimeUnit unit) {
-    final FutureTask<Void> futureTask = new FutureTask(task);
-    timeoutExecutor.add(new DelayedTask(futureTask, delay, unit));
-    return futureTask;
+  protected final void submitTask(Runnable task, long delay, TimeUnit unit) {
+    timeoutExecutor.add(new DelayedTask(task, delay, unit));
   }
 
   protected abstract void remoteDispatch(TRemote key, Set<RemoteProcedure> operations);
@@ -226,32 +229,61 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
 
   /**
    * Remote procedure reference.
-   * @param <TEnv>
-   * @param <TRemote>
    */
   public interface RemoteProcedure<TEnv, TRemote> {
-    RemoteOperation remoteCallBuild(TEnv env, TRemote remote);
-    void remoteCallCompleted(TEnv env, TRemote remote, RemoteOperation response);
+    /**
+     * For building the remote operation.
+     * May be empty if no need to send remote call. Usually, this means the RemoteProcedure has been
+     * finished already. This is possible, as we may have already sent the procedure to RS but then
+     * the rpc connection is broken so the executeProcedures call fails, but the RS does receive the
+     * procedure and execute it and then report back, before we retry again.
+     */
+    Optional<RemoteOperation> remoteCallBuild(TEnv env, TRemote remote);
+
+    /**
+     * Called when the executeProcedure call is failed.
+     */
     void remoteCallFailed(TEnv env, TRemote remote, IOException exception);
+
+    /**
+     * Called when RS tells the remote procedure is succeeded through the
+     * {@code reportProcedureDone} method.
+     */
+    void remoteOperationCompleted(TEnv env);
+
+    /**
+     * Called when RS tells the remote procedure is failed through the {@code reportProcedureDone}
+     * method.
+     */
+    void remoteOperationFailed(TEnv env, RemoteProcedureException error);
+
+    /**
+     * Whether store this remote procedure in dispatched queue
+     * only OpenRegionProcedure and CloseRegionProcedure return false since they are
+     * not fully controlled by dispatcher
+     */
+    default boolean storeInDispatchedQueue() {
+      return true;
+    }
   }
 
   /**
    * Account of what procedures are running on remote node.
-   * @param <TEnv>
-   * @param <TRemote>
    */
   public interface RemoteNode<TEnv, TRemote> {
     TRemote getKey();
+
     void add(RemoteProcedure<TEnv, TRemote> operation);
+
     void dispatch();
   }
 
   protected ArrayListMultimap<Class<?>, RemoteOperation> buildAndGroupRequestByType(final TEnv env,
       final TRemote remote, final Set<RemoteProcedure> remoteProcedures) {
     final ArrayListMultimap<Class<?>, RemoteOperation> requestByType = ArrayListMultimap.create();
-    for (RemoteProcedure proc: remoteProcedures) {
-      RemoteOperation operation = proc.remoteCallBuild(env, remote);
-      requestByType.put(operation.getClass(), operation);
+    for (RemoteProcedure proc : remoteProcedures) {
+      Optional<RemoteOperation> operation = proc.remoteCallBuild(env, remote);
+      operation.ifPresent(op -> requestByType.put(op.getClass(), op));
     }
     return requestByType;
   }
@@ -280,9 +312,9 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
           continue;
         }
         if (task instanceof DelayedTask) {
-          threadPool.execute(((DelayedTask)task).getObject());
+          threadPool.execute(((DelayedTask) task).getObject());
         } else {
-          ((BufferNode)task).dispatch();
+          ((BufferNode) task).dispatch();
         }
       }
     }
@@ -326,6 +358,7 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
   protected final class BufferNode extends DelayedContainerWithTimestamp<TRemote>
       implements RemoteNode<TEnv, TRemote> {
     private Set<RemoteProcedure> operations;
+    private final Set<RemoteProcedure> dispatchedOperations = new HashSet<>();
 
     protected BufferNode(final TRemote key) {
       super(key, 0);
@@ -354,6 +387,8 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
     public synchronized void dispatch() {
       if (operations != null) {
         remoteDispatch(getKey(), operations);
+        operations.stream().filter(operation -> operation.storeInDispatchedQueue())
+            .forEach(operation -> dispatchedOperations.add(operation));
         this.operations = null;
       }
     }
@@ -363,6 +398,12 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
         abortPendingOperations(getKey(), operations);
         this.operations = null;
       }
+      abortPendingOperations(getKey(), dispatchedOperations);
+      this.dispatchedOperations.clear();
+    }
+
+    public synchronized void operationCompleted(final RemoteProcedure remoteProcedure){
+      this.dispatchedOperations.remove(remoteProcedure);
     }
 
     @Override
@@ -373,10 +414,11 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
 
   /**
    * Delayed object that holds a FutureTask.
+   * <p/>
    * used to submit something later to the thread-pool.
    */
-  private static final class DelayedTask extends DelayedContainerWithTimestamp<FutureTask<Void>> {
-    public DelayedTask(final FutureTask<Void> task, final long delay, final TimeUnit unit) {
+  private static final class DelayedTask extends DelayedContainerWithTimestamp<Runnable> {
+    public DelayedTask(Runnable task, long delay, TimeUnit unit) {
       super(task, EnvironmentEdgeManager.currentTime() + unit.toMillis(delay));
     }
   };

@@ -23,7 +23,6 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.util.Optional;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.io.ByteArrayOutputStream;
 import org.apache.hadoop.hbase.io.TimeRange;
@@ -50,13 +49,13 @@ public class TestSimpleTimeRangeTracker {
 
   @Test
   public void testExtreme() {
-    TimeRange tr = new TimeRange();
-    assertTrue(tr.includesTimeRange(new TimeRange()));
+    TimeRange tr = TimeRange.allTime();
+    assertTrue(tr.includesTimeRange(TimeRange.allTime()));
     TimeRangeTracker trt = getTimeRangeTracker();
-    assertFalse(trt.includesTimeRange(new TimeRange()));
+    assertFalse(trt.includesTimeRange(TimeRange.allTime()));
     trt.includeTimestamp(1);
     trt.includeTimestamp(10);
-    assertTrue(trt.includesTimeRange(new TimeRange()));
+    assertTrue(trt.includesTimeRange(TimeRange.allTime()));
   }
 
   @Test
@@ -114,7 +113,7 @@ public class TestSimpleTimeRangeTracker {
 
   @Test
   public void testRangeConstruction() throws IOException {
-    TimeRange defaultRange = new TimeRange();
+    TimeRange defaultRange = TimeRange.allTime();
     assertEquals(0L, defaultRange.getMin());
     assertEquals(Long.MAX_VALUE, defaultRange.getMax());
     assertTrue(defaultRange.isAllTime());

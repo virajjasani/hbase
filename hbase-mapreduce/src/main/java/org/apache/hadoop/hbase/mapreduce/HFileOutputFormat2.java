@@ -72,6 +72,7 @@ import org.apache.hadoop.hbase.io.hfile.HFileWriterImpl;
 import org.apache.hadoop.hbase.regionserver.BloomType;
 import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.StoreFileWriter;
+import org.apache.hadoop.hbase.util.BloomFilterUtil;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
@@ -118,7 +119,10 @@ public class HFileOutputFormat2
     /**
      * The modification for the returned HTD doesn't affect the inner TD.
      * @return A clone of inner table descriptor
-     * @deprecated use {@link #getTableDescriptor}
+     * @deprecated since 2.0.0 and will be removed in 3.0.0. Use {@link #getTableDescriptor()}
+     *   instead.
+     * @see #getTableDescriptor()
+     * @see <a href="https://issues.apache.org/jira/browse/HBASE-18241">HBASE-18241</a>
      */
     @Deprecated
     public HTableDescriptor getHTableDescriptor() {
@@ -148,6 +152,8 @@ public class HFileOutputFormat2
       "hbase.hfileoutputformat.families.compression";
   static final String BLOOM_TYPE_FAMILIES_CONF_KEY =
       "hbase.hfileoutputformat.families.bloomtype";
+  static final String BLOOM_PARAM_FAMILIES_CONF_KEY =
+      "hbase.hfileoutputformat.families.bloomparam";
   static final String BLOCK_SIZE_FAMILIES_CONF_KEY =
       "hbase.mapreduce.hfileoutputformat.blocksize";
   static final String DATABLOCK_ENCODING_FAMILIES_CONF_KEY =
@@ -156,9 +162,11 @@ public class HFileOutputFormat2
   // This constant is public since the client can modify this when setting
   // up their conf object and thus refer to this symbol.
   // It is present for backwards compatibility reasons. Use it only to
-  // override the auto-detection of datablock encoding.
+  // override the auto-detection of datablock encoding and compression.
   public static final String DATABLOCK_ENCODING_OVERRIDE_CONF_KEY =
       "hbase.mapreduce.hfileoutputformat.datablock.encoding";
+  public static final String COMPRESSION_OVERRIDE_CONF_KEY =
+      "hbase.mapreduce.hfileoutputformat.compression";
 
   /**
    * Keep locality while generating HFiles for bulkload. See HBASE-12596
@@ -206,6 +214,13 @@ public class HFileOutputFormat2
         Compression.Algorithm.NONE.getName());
     final Algorithm defaultCompression = HFileWriterImpl
         .compressionByName(defaultCompressionStr);
+    String compressionStr = conf.get(COMPRESSION_OVERRIDE_CONF_KEY);
+    final Algorithm overriddenCompression;
+    if (compressionStr != null) {
+      overriddenCompression = Compression.getCompressionAlgorithmByName(compressionStr);
+    } else {
+      overriddenCompression = null;
+    }
     final boolean compactionExclude = conf.getBoolean(
         "hbase.mapreduce.hfileoutputformat.compaction.exclude", false);
 
@@ -215,6 +230,7 @@ public class HFileOutputFormat2
     // create a map from column family to the compression algorithm
     final Map<byte[], Algorithm> compressionMap = createFamilyCompressionMap(conf);
     final Map<byte[], BloomType> bloomTypeMap = createFamilyBloomTypeMap(conf);
+    final Map<byte[], String> bloomParamMap = createFamilyBloomParamMap(conf);
     final Map<byte[], Integer> blockSizeMap = createFamilyBlockSizeMap(conf);
 
     String dataBlockEncodingStr = conf.get(DATABLOCK_ENCODING_OVERRIDE_CONF_KEY);
@@ -379,17 +395,20 @@ public class HFileOutputFormat2
                   new Path(Bytes.toString(tableName), Bytes.toString(family)));
         }
         WriterLength wl = new WriterLength();
-        Algorithm compression = compressionMap.get(tableAndFamily);
+        Algorithm compression = overriddenCompression;
+        compression = compression == null ? compressionMap.get(tableAndFamily) : compression;
         compression = compression == null ? defaultCompression : compression;
         BloomType bloomType = bloomTypeMap.get(tableAndFamily);
         bloomType = bloomType == null ? BloomType.NONE : bloomType;
+        String bloomParam = bloomParamMap.get(tableAndFamily);
+        if (bloomType == BloomType.ROWPREFIX_FIXED_LENGTH) {
+          conf.set(BloomFilterUtil.PREFIX_LENGTH_KEY, bloomParam);
+        }
         Integer blockSize = blockSizeMap.get(tableAndFamily);
         blockSize = blockSize == null ? HConstants.DEFAULT_BLOCKSIZE : blockSize;
         DataBlockEncoding encoding = overriddenEncoding;
         encoding = encoding == null ? datablockEncodingMap.get(tableAndFamily) : encoding;
         encoding = encoding == null ? DataBlockEncoding.NONE : encoding;
-        Configuration tempConf = new Configuration(conf);
-        tempConf.setFloat(HConstants.HFILE_BLOCK_CACHE_SIZE_KEY, 0.0f);
         HFileContextBuilder contextBuilder = new HFileContextBuilder()
                                     .withCompression(compression)
                                     .withChecksumType(HStore.getChecksumType(conf))
@@ -404,12 +423,12 @@ public class HFileOutputFormat2
         HFileContext hFileContext = contextBuilder.build();
         if (null == favoredNodes) {
           wl.writer =
-              new StoreFileWriter.Builder(conf, new CacheConfig(tempConf), fs)
+              new StoreFileWriter.Builder(conf, CacheConfig.DISABLED, fs)
                   .withOutputDir(familydir).withBloomType(bloomType)
                   .withComparator(CellComparator.getInstance()).withFileContext(hFileContext).build();
         } else {
           wl.writer =
-              new StoreFileWriter.Builder(conf, new CacheConfig(tempConf), new HFileSystem(fs))
+              new StoreFileWriter.Builder(conf, CacheConfig.DISABLED, new HFileSystem(fs))
                   .withOutputDir(familydir).withBloomType(bloomType)
                   .withComparator(CellComparator.getInstance()).withFileContext(hFileContext)
                   .withFavoredNodes(favoredNodes).build();
@@ -648,6 +667,8 @@ public class HFileOutputFormat2
             tableDescriptors));
     conf.set(BLOOM_TYPE_FAMILIES_CONF_KEY, serializeColumnFamilyAttribute(bloomTypeDetails,
             tableDescriptors));
+    conf.set(BLOOM_PARAM_FAMILIES_CONF_KEY, serializeColumnFamilyAttribute(bloomParamDetails,
+        tableDescriptors));
     conf.set(DATABLOCK_ENCODING_FAMILIES_CONF_KEY,
             serializeColumnFamilyAttribute(dataBlockEncodingDetails, tableDescriptors));
 
@@ -675,6 +696,8 @@ public class HFileOutputFormat2
         serializeColumnFamilyAttribute(blockSizeDetails, singleTableDescriptor));
     conf.set(BLOOM_TYPE_FAMILIES_CONF_KEY,
         serializeColumnFamilyAttribute(bloomTypeDetails, singleTableDescriptor));
+    conf.set(BLOOM_PARAM_FAMILIES_CONF_KEY,
+        serializeColumnFamilyAttribute(bloomParamDetails, singleTableDescriptor));
     conf.set(DATABLOCK_ENCODING_FAMILIES_CONF_KEY,
         serializeColumnFamilyAttribute(dataBlockEncodingDetails, singleTableDescriptor));
 
@@ -721,6 +744,19 @@ public class HFileOutputFormat2
     }
     return bloomTypeMap;
   }
+
+  /**
+   * Runs inside the task to deserialize column family to bloom filter param
+   * map from the configuration.
+   *
+   * @param conf to read the serialized values from
+   * @return a map from column family to the the configured bloom filter param
+   */
+  @VisibleForTesting
+  static Map<byte[], String> createFamilyBloomParamMap(Configuration conf) {
+    return createFamilyConfValueMap(conf, BLOOM_PARAM_FAMILIES_CONF_KEY);
+  }
+
 
   /**
    * Runs inside the task to deserialize column family to block size
@@ -842,11 +878,6 @@ public class HFileOutputFormat2
   /**
    * Serialize column family to compression algorithm map to configuration.
    * Invoked while configuring the MR job for incremental load.
-   *
-   * @param tableDescriptor to read the properties from
-   * @param conf to persist serialized values into
-   * @throws IOException
-   *           on failure to read column family descriptors
    */
   @VisibleForTesting
   static Function<ColumnFamilyDescriptor, String> compressionDetails = familyDescriptor ->
@@ -855,14 +886,6 @@ public class HFileOutputFormat2
   /**
    * Serialize column family to block size map to configuration. Invoked while
    * configuring the MR job for incremental load.
-   *
-   * @param tableDescriptor
-   *          to read the properties from
-   * @param conf
-   *          to persist serialized values into
-   *
-   * @throws IOException
-   *           on failure to read column family descriptors
    */
   @VisibleForTesting
   static Function<ColumnFamilyDescriptor, String> blockSizeDetails = familyDescriptor -> String
@@ -871,14 +894,6 @@ public class HFileOutputFormat2
   /**
    * Serialize column family to bloom type map to configuration. Invoked while
    * configuring the MR job for incremental load.
-   *
-   * @param tableDescriptor
-   *          to read the properties from
-   * @param conf
-   *          to persist serialized values into
-   *
-   * @throws IOException
-   *           on failure to read column family descriptors
    */
   @VisibleForTesting
   static Function<ColumnFamilyDescriptor, String> bloomTypeDetails = familyDescriptor -> {
@@ -890,15 +905,22 @@ public class HFileOutputFormat2
   };
 
   /**
+   * Serialize column family to bloom param map to configuration. Invoked while
+   * configuring the MR job for incremental load.
+   */
+  @VisibleForTesting
+  static Function<ColumnFamilyDescriptor, String> bloomParamDetails = familyDescriptor -> {
+    BloomType bloomType = familyDescriptor.getBloomFilterType();
+    String bloomParam = "";
+    if (bloomType == BloomType.ROWPREFIX_FIXED_LENGTH) {
+      bloomParam = familyDescriptor.getConfigurationValue(BloomFilterUtil.PREFIX_LENGTH_KEY);
+    }
+    return bloomParam;
+  };
+
+  /**
    * Serialize column family to data block encoding map to configuration.
    * Invoked while configuring the MR job for incremental load.
-   *
-   * @param tableDescriptor
-   *          to read the properties from
-   * @param conf
-   *          to persist serialized values into
-   * @throws IOException
-   *           on failure to read column family descriptors
    */
   @VisibleForTesting
   static Function<ColumnFamilyDescriptor, String> dataBlockEncodingDetails = familyDescriptor -> {

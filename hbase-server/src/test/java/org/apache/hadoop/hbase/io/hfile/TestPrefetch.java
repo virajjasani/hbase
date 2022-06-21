@@ -17,10 +17,12 @@
  */
 package org.apache.hadoop.hbase.io.hfile;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.util.Random;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -28,8 +30,9 @@ import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.fs.HFileSystem;
 import org.apache.hadoop.hbase.regionserver.StoreFileWriter;
 import org.apache.hadoop.hbase.testclassification.IOTests;
@@ -57,30 +60,57 @@ public class TestPrefetch {
   private Configuration conf;
   private CacheConfig cacheConf;
   private FileSystem fs;
+  private BlockCache blockCache;
 
   @Before
   public void setUp() throws IOException {
     conf = TEST_UTIL.getConfiguration();
     conf.setBoolean(CacheConfig.PREFETCH_BLOCKS_ON_OPEN_KEY, true);
     fs = HFileSystem.get(conf);
-    CacheConfig.blockCacheDisabled = false;
-    cacheConf = new CacheConfig(conf);
+    blockCache = BlockCacheFactory.createBlockCache(conf);
+    cacheConf = new CacheConfig(conf, blockCache);
   }
 
   @Test
   public void testPrefetchSetInHCDWorks() {
-    HColumnDescriptor hcd = new HColumnDescriptor(Bytes.toBytes("f"));
-    hcd.setPrefetchBlocksOnOpen(true);
+    ColumnFamilyDescriptor columnFamilyDescriptor =
+        ColumnFamilyDescriptorBuilder.newBuilder(Bytes.toBytes("f")).setPrefetchBlocksOnOpen(true)
+            .build();
     Configuration c = HBaseConfiguration.create();
     assertFalse(c.getBoolean(CacheConfig.PREFETCH_BLOCKS_ON_OPEN_KEY, false));
-    CacheConfig cc = new CacheConfig(c, hcd);
+    CacheConfig cc = new CacheConfig(c, columnFamilyDescriptor, blockCache);
     assertTrue(cc.shouldPrefetchOnOpen());
   }
 
   @Test
   public void testPrefetch() throws Exception {
-    Path storeFile = writeStoreFile();
+    Path storeFile = writeStoreFile("TestPrefetch");
     readStoreFile(storeFile);
+  }
+
+  @Test
+  public void testPrefetchRace() throws Exception {
+    for (int i = 0; i < 10; i++) {
+      Path storeFile = writeStoreFile("TestPrefetchRace-" + i);
+      readStoreFileLikeScanner(storeFile);
+    }
+  }
+
+  /**
+   * Read a storefile in the same manner as a scanner -- using non-positional reads and
+   * without waiting for prefetch to complete.
+   */
+  private void readStoreFileLikeScanner(Path storeFilePath) throws Exception {
+    // Open the file
+    HFile.Reader reader = HFile.createReader(fs, storeFilePath, cacheConf, true, conf);
+    do {
+      long offset = 0;
+      while (offset < reader.getTrailer().getLoadOnOpenDataOffset()) {
+        HFileBlock block = reader.readBlock(offset, -1, false, /*pread=*/false,
+            false, true, null, null);
+        offset += block.getOnDiskSizeWithHeader();
+      }
+    } while (!reader.prefetchComplete());
   }
 
   private void readStoreFile(Path storeFilePath) throws Exception {
@@ -93,7 +123,7 @@ public class TestPrefetch {
     }
 
     // Check that all of the data blocks were preloaded
-    BlockCache blockCache = cacheConf.getBlockCache();
+    BlockCache blockCache = cacheConf.getBlockCache().get();
     long offset = 0;
     while (offset < reader.getTrailer().getLoadOnOpenDataOffset()) {
       HFileBlock block = reader.readBlock(offset, -1, false, true, false, true, null, null);
@@ -108,8 +138,8 @@ public class TestPrefetch {
     }
   }
 
-  private Path writeStoreFile() throws IOException {
-    Path storeFileParentDir = new Path(TEST_UTIL.getDataTestDir(), "TestPrefetch");
+  private Path writeStoreFile(String fname) throws IOException {
+    Path storeFileParentDir = new Path(TEST_UTIL.getDataTestDir(), fname);
     HFileContext meta = new HFileContextBuilder()
       .withBlockSize(DATA_BLOCK_SIZE)
       .build();

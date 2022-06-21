@@ -374,13 +374,13 @@ possible configurations would overwhelm and obscure the important.
     <description>ZooKeeper session timeout in milliseconds. It is used in two different ways.
       First, this value is used in the ZK client that HBase uses to connect to the ensemble.
       It is also used by HBase when it starts a ZK server and it is passed as the 'maxSessionTimeout'.
-      See http://hadoop.apache.org/zookeeper/docs/current/zookeeperProgrammers.html#ch_zkSessions.
+      See https://zookeeper.apache.org/doc/current/zookeeperProgrammers.html#ch_zkSessions.
       For example, if an HBase region server connects to a ZK ensemble that's also managed
       by HBase, then the session timeout will be the one specified by this configuration.
       But, a region server that connects to an ensemble managed with a different configuration
       will be subjected that ensemble's maxSessionTimeout. So, even though HBase might propose
       using 90 seconds, the ensemble can have a max timeout lower than this and it will take
-      precedence. The current default that ZK ships with is 40 seconds, which is lower than
+      precedence. The current default maxSessionTimeout that ZK ships with is 40 seconds, which is lower than
       HBase's.
     </description>
   </property>
@@ -419,14 +419,14 @@ possible configurations would overwhelm and obscure the important.
     <name>hbase.zookeeper.peerport</name>
     <value>2888</value>
     <description>Port used by ZooKeeper peers to talk to each other.
-    See http://hadoop.apache.org/zookeeper/docs/r3.1.1/zookeeperStarted.html#sc_RunningReplicatedZooKeeper
+    See https://zookeeper.apache.org/doc/r3.3.3/zookeeperStarted.html#sc_RunningReplicatedZooKeeper
     for more information.</description>
   </property>
   <property>
     <name>hbase.zookeeper.leaderport</name>
     <value>3888</value>
     <description>Port used by ZooKeeper for leader election.
-    See http://hadoop.apache.org/zookeeper/docs/r3.1.1/zookeeperStarted.html#sc_RunningReplicatedZooKeeper
+    See https://zookeeper.apache.org/doc/r3.3.3/zookeeperStarted.html#sc_RunningReplicatedZooKeeper
     for more information.</description>
   </property>
   <!-- End of properties used to generate ZooKeeper host:port quorum list. -->
@@ -727,6 +727,13 @@ possible configurations would overwhelm and obscure the important.
       (one StoreFile is written per flush of MemStore), a compaction is run to rewrite all
       StoreFiles into a single StoreFile. Larger values delay compaction, but when compaction does
       occur, it takes longer to complete.</description>
+  </property>
+  <property>
+    <name>hbase.regionserver.compaction.enabled</name>
+    <value>true</value>
+    <description>Enable/disable compactions on by setting true/false.
+      We can further switch compactions dynamically with the
+      compaction_switch shell command.</description>
   </property>
   <property>
     <name>hbase.hstore.flusher.count</name>
@@ -1310,6 +1317,15 @@ possible configurations would overwhelm and obscure the important.
       to create a name based on what you are restoring.</description>
   </property>
   <property>
+    <name>hbase.snapshot.working.dir</name>
+    <value></value>
+    <description>Location where the snapshotting process will occur. The location of the
+      completed snapshots will not change, but the temporary directory where the snapshot
+      process occurs will be set to this location. This can be a separate filesystem than
+      the root directory, for performance increase purposes. See HBASE-21098 for more
+      information</description>
+  </property>
+  <property>
     <name>hbase.server.compactchecker.interval.multiplier</name>
     <value>1000</value>
     <description>The number that determines how often we scan to see if compaction is necessary.
@@ -1656,19 +1672,6 @@ possible configurations would overwhelm and obscure the important.
         chunks each replication batch is broken into. Larger values can improve
         the replication throughput between the master and slave clusters. The
         default of 10 will rarely need to be changed.
-    </description>
-  </property>
-  <property>
-    <name>hbase.serial.replication.waitingMs</name>
-    <value>10000</value>
-    <description>
-      By default, in replication we can not make sure the order of operations in slave cluster is
-      same as the order in master. If set REPLICATION_SCOPE to 2, we will push edits by the order
-      of written. This configuration is to set how long (in ms) we will wait before next checking if
-      a log can NOT be pushed because there are some logs written before it that have yet to be
-      pushed. A larger waiting will decrease the number of queries on hbase:meta but will enlarge
-      the delay of replication. This feature relies on zk-less assignment, so users must set
-      hbase.assignment.usezk to false to support it.
     </description>
   </property>
   <!-- Static Web User Filter properties. -->

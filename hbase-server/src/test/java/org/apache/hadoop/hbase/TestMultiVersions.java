@@ -150,7 +150,9 @@ public class TestMultiVersions {
     table.close();
     UTIL.shutdownMiniHBaseCluster();
     LOG.debug("HBase cluster shut down -- restarting");
-    UTIL.startMiniHBaseCluster(1, NUM_SLAVES);
+    StartMiniClusterOption option = StartMiniClusterOption.builder()
+        .numRegionServers(NUM_SLAVES).build();
+    UTIL.startMiniHBaseCluster(option);
     // Make a new connection.
     table = UTIL.getConnection().getTable(desc.getTableName());
     // Overwrite previous value
@@ -238,7 +240,7 @@ public class TestMultiVersions {
       for (int j = 0; j < timestamp.length; j++) {
         Get get = new Get(rows[i]);
         get.addFamily(HConstants.CATALOG_FAMILY);
-        get.setTimeStamp(timestamp[j]);
+        get.setTimestamp(timestamp[j]);
         Result result = table.get(get);
         int cellCount = 0;
         for(@SuppressWarnings("unused")Cell kv : result.listCells()) {
@@ -286,7 +288,7 @@ public class TestMultiVersions {
 
     count = 0;
     scan = new Scan();
-    scan.setTimeStamp(1000L);
+    scan.setTimestamp(1000L);
     scan.addFamily(HConstants.CATALOG_FAMILY);
 
     s = table.getScanner(scan);
@@ -322,7 +324,7 @@ public class TestMultiVersions {
 
     count = 0;
     scan = new Scan();
-    scan.setTimeStamp(100L);
+    scan.setTimestamp(100L);
     scan.addFamily(HConstants.CATALOG_FAMILY);
 
     s = table.getScanner(scan);

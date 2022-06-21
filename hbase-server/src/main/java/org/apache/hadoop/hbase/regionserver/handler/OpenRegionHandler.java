@@ -27,9 +27,8 @@ import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.executor.EventHandler;
 import org.apache.hadoop.hbase.executor.EventType;
+import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.regionserver.HRegion;
-import org.apache.hadoop.hbase.regionserver.Region;
-import org.apache.hadoop.hbase.regionserver.RegionServerAccounting;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices.PostOpenDeployContext;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices.RegionStateTransitionContext;
@@ -42,7 +41,10 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProto
  * Handles opening of a region on a region server.
  * <p>
  * This is executed after receiving an OPEN RPC from the master or client.
+ * @deprecated Keep it here only for compatible
+ * @see AssignRegionHandler
  */
+@Deprecated
 @InterfaceAudience.Private
 public class OpenRegionHandler extends EventHandler {
   private static final Logger LOG = LoggerFactory.getLogger(OpenRegionHandler.class);
@@ -154,15 +156,14 @@ public class OpenRegionHandler extends EventHandler {
     }
   }
 
-  private void doCleanUpOnFailedOpen(HRegion region)
-      throws IOException {
+  private void doCleanUpOnFailedOpen(HRegion region) throws IOException {
     try {
       if (region != null) {
         cleanupFailedOpen(region);
       }
     } finally {
       rsServices.reportRegionStateTransition(new RegionStateTransitionContext(
-          TransitionCode.FAILED_OPEN, HConstants.NO_SEQNUM, -1, regionInfo));
+        TransitionCode.FAILED_OPEN, HConstants.NO_SEQNUM, Procedure.NO_PROC_ID, -1, regionInfo));
     }
   }
 
@@ -173,7 +174,7 @@ public class OpenRegionHandler extends EventHandler {
    * state meantime so master doesn't timeout our region-in-transition.
    * Caller must cleanup region if this fails.
    */
-  boolean updateMeta(final HRegion r, long masterSystemTime) {
+  private boolean updateMeta(final HRegion r, long masterSystemTime) {
     if (this.server.isStopped() || this.rsServices.isStopping()) {
       return false;
     }
@@ -222,7 +223,8 @@ public class OpenRegionHandler extends EventHandler {
 
   /**
    * Thread to run region post open tasks. Call {@link #getException()} after the thread finishes
-   * to check for exceptions running {@link RegionServerServices#postOpenDeployTasks(Region)}.
+   * to check for exceptions running
+   * {@link RegionServerServices#postOpenDeployTasks(PostOpenDeployContext)}
    */
   static class PostOpenDeployTasksThread extends Thread {
     private Throwable exception = null;
@@ -246,19 +248,19 @@ public class OpenRegionHandler extends EventHandler {
     @Override
     public void run() {
       try {
-        this.services.postOpenDeployTasks(new PostOpenDeployContext(region, masterSystemTime));
+        this.services.postOpenDeployTasks(
+          new PostOpenDeployContext(region, Procedure.NO_PROC_ID, masterSystemTime));
       } catch (Throwable e) {
         String msg = "Exception running postOpenDeployTasks; region=" +
           this.region.getRegionInfo().getEncodedName();
         this.exception = e;
-        if (e instanceof IOException
-            && isRegionStillOpening(region.getRegionInfo(), services)) {
+        if (e instanceof IOException && isRegionStillOpening(region.getRegionInfo(), services)) {
           server.abort(msg, e);
         } else {
           LOG.warn(msg, e);
         }
       }
-      // We're done.  Set flag then wake up anyone waiting on thread to complete.
+      // We're done. Set flag then wake up anyone waiting on thread to complete.
       this.signaller.set(true);
       synchronized (this.signaller) {
         this.signaller.notify();
@@ -276,7 +278,7 @@ public class OpenRegionHandler extends EventHandler {
   /**
    * @return Instance of HRegion if successful open else null.
    */
-  HRegion openRegion() {
+  private HRegion openRegion() {
     HRegion region = null;
     try {
       // Instantiate the region.  This also periodically tickles OPENING
@@ -300,21 +302,12 @@ public class OpenRegionHandler extends EventHandler {
       // and transition the node back to FAILED_OPEN. If that fails,
       // we rely on the Timeout Monitor in the master to reassign.
       LOG.error(
-          "Failed open of region=" + this.regionInfo.getRegionNameAsString()
-              + ", starting to roll back the global memstore size.", t);
-      // Decrease the global memstore size.
-      if (this.rsServices != null) {
-        RegionServerAccounting rsAccounting =
-          this.rsServices.getRegionServerAccounting();
-        if (rsAccounting != null) {
-          rsAccounting.rollbackRegionReplayEditsSize(this.regionInfo.getRegionName());
-        }
-      }
+          "Failed open of region=" + this.regionInfo.getRegionNameAsString(), t);
     }
     return region;
   }
 
-  void cleanupFailedOpen(final HRegion region) throws IOException {
+  private void cleanupFailedOpen(final HRegion region) throws IOException {
     if (region != null) {
       this.rsServices.removeRegion(region, null);
       region.close();

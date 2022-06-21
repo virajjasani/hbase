@@ -52,7 +52,6 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.TreeMap;
-import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -87,7 +86,6 @@ import org.apache.hadoop.hbase.HDFSBlocksDistribution;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.MultithreadedTestUtil;
 import org.apache.hadoop.hbase.MultithreadedTestUtil.RepeatingTestThread;
@@ -96,6 +94,7 @@ import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.RegionTooBusyException;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.StartMiniClusterOption;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TagType;
 import org.apache.hadoop.hbase.Waiter;
@@ -114,6 +113,7 @@ import org.apache.hadoop.hbase.client.RowMutations;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.exceptions.FailedSanityCheckException;
 import org.apache.hadoop.hbase.filter.BigDecimalComparator;
 import org.apache.hadoop.hbase.filter.BinaryComparator;
@@ -140,6 +140,7 @@ import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequestImpl;
 import org.apache.hadoop.hbase.regionserver.wal.FSHLog;
 import org.apache.hadoop.hbase.regionserver.wal.MetricsWALSource;
 import org.apache.hadoop.hbase.regionserver.wal.WALUtil;
+import org.apache.hadoop.hbase.replication.regionserver.ReplicationObserver;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.test.MetricsAssertHelper;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
@@ -153,13 +154,14 @@ import org.apache.hadoop.hbase.util.ManualEnvironmentEdge;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.hbase.wal.FaultyFSLog;
+import org.apache.hadoop.hbase.wal.NettyAsyncFSWALConfigHelper;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.wal.WALFactory;
 import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.hadoop.hbase.wal.WALProvider;
 import org.apache.hadoop.hbase.wal.WALProvider.Writer;
-import org.apache.hadoop.hbase.wal.WALSplitter;
+import org.apache.hadoop.hbase.wal.WALSplitUtil;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -179,6 +181,9 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 import org.apache.hbase.thirdparty.com.google.protobuf.ByteString;
+import org.apache.hbase.thirdparty.io.netty.channel.EventLoopGroup;
+import org.apache.hbase.thirdparty.io.netty.channel.nio.NioEventLoopGroup;
+import org.apache.hbase.thirdparty.io.netty.channel.socket.nio.NioSocketChannel;
 
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.CompactionDescriptor;
@@ -211,6 +216,7 @@ public class TestHRegion {
 
   private static final String COLUMN_FAMILY = "MyCF";
   private static final byte [] COLUMN_FAMILY_BYTES = Bytes.toBytes(COLUMN_FAMILY);
+  private static final EventLoopGroup GROUP = new NioEventLoopGroup();
 
   HRegion region = null;
   // Do not run unit tests in parallel (? Why not?  It don't work?  Why not?  St.Ack)
@@ -241,13 +247,17 @@ public class TestHRegion {
     TEST_UTIL = HBaseTestingUtility.createLocalHTU();
     FILESYSTEM = TEST_UTIL.getTestFileSystem();
     CONF = TEST_UTIL.getConfiguration();
+    NettyAsyncFSWALConfigHelper.setEventLoopConfig(CONF, GROUP, NioSocketChannel.class);
     dir = TEST_UTIL.getDataTestDir("TestHRegion").toString();
     method = name.getMethodName();
     tableName = TableName.valueOf(method);
+    CONF.set(CompactingMemStore.IN_MEMORY_FLUSH_THRESHOLD_FACTOR_KEY, String.valueOf(0.09));
   }
 
   @After
-  public void tearDown() throws Exception {
+  public void tearDown() throws IOException {
+    // Region may have been closed, but it is still no harm if we close it again here using HTU.
+    HBaseTestingUtility.closeRegionAndWAL(region);
     EnvironmentEdgeManagerTestHelper.reset();
     LOG.info("Cleaning test directory: " + TEST_UTIL.getDataTestDir());
     TEST_UTIL.cleanupTestDir();
@@ -259,11 +269,11 @@ public class TestHRegion {
    */
   @Test
   public void testSequenceId() throws IOException {
-    HRegion region = initHRegion(tableName, method, CONF, COLUMN_FAMILY_BYTES);
+    region = initHRegion(tableName, method, CONF, COLUMN_FAMILY_BYTES);
     assertEquals(HConstants.NO_SEQNUM, region.getMaxFlushedSeqId());
     // Weird. This returns 0 if no store files or no edits. Afraid to change it.
     assertEquals(0, (long)region.getMaxStoreSeqId().get(COLUMN_FAMILY_BYTES));
-    region.close();
+    HBaseTestingUtility.closeRegionAndWAL(this.region);
     assertEquals(HConstants.NO_SEQNUM, region.getMaxFlushedSeqId());
     assertEquals(0, (long)region.getMaxStoreSeqId().get(COLUMN_FAMILY_BYTES));
     // Open region again.
@@ -278,8 +288,9 @@ public class TestHRegion {
     assertEquals(0, (long)region.getMaxStoreSeqId().get(COLUMN_FAMILY_BYTES));
     region.flush(true);
     long max = region.getMaxFlushedSeqId();
-    region.close();
+    HBaseTestingUtility.closeRegionAndWAL(this.region);
     assertEquals(max, region.getMaxFlushedSeqId());
+    this.region = null;
   }
 
   /**
@@ -294,7 +305,7 @@ public class TestHRegion {
    */
   @Test
   public void testCloseCarryingSnapshot() throws IOException {
-    HRegion region = initHRegion(tableName, method, CONF, COLUMN_FAMILY_BYTES);
+    region = initHRegion(tableName, method, CONF, COLUMN_FAMILY_BYTES);
     HStore store = region.getStore(COLUMN_FAMILY_BYTES);
     // Get some random bytes.
     byte [] value = Bytes.toBytes(method);
@@ -309,9 +320,9 @@ public class TestHRegion {
     put.addColumn(COLUMN_FAMILY_BYTES, Bytes.toBytes("abc"), value);
     region.put(put);
     // Close with something in memstore and something in the snapshot.  Make sure all is cleared.
-    region.close();
-    assertEquals(0, region.getMemStoreSize());
     HBaseTestingUtility.closeRegionAndWAL(region);
+    assertEquals(0, region.getMemStoreDataSize());
+    region = null;
   }
 
   /*
@@ -341,7 +352,7 @@ public class TestHRegion {
     FileSystem fs = FileSystem.get(CONF);
     Path rootDir = new Path(dir + "testMemstoreSnapshotSize");
     MyFaultyFSLog faultyLog = new MyFaultyFSLog(fs, rootDir, "testMemstoreSnapshotSize", CONF);
-    HRegion region = initHRegion(tableName, null, null, false, Durability.SYNC_WAL, faultyLog,
+    region = initHRegion(tableName, null, null, false, Durability.SYNC_WAL, faultyLog,
         COLUMN_FAMILY_BYTES);
 
     HStore store = region.getStore(COLUMN_FAMILY_BYTES);
@@ -361,9 +372,9 @@ public class TestHRegion {
     } finally {
       assertTrue("The regionserver should have thrown an exception", threwIOE);
     }
-    long sz = store.getFlushableSize().getDataSize();
-    assertTrue("flushable size should be zero, but it is " + sz, sz == 0);
-    HBaseTestingUtility.closeRegionAndWAL(region);
+    MemStoreSize mss = store.getFlushableSize();
+    assertTrue("flushable size should be zero, but it is " + mss,
+        mss.getDataSize() == 0);
   }
 
   /**
@@ -388,17 +399,18 @@ public class TestHRegion {
     FileSystem fs = FileSystem.get(CONF);
     Path rootDir = new Path(dir + testName);
     FSHLog hLog = new FSHLog(fs, rootDir, testName, CONF);
+    hLog.init();
     HRegion region = initHRegion(tableName, null, null, false, Durability.SYNC_WAL, hLog,
         COLUMN_FAMILY_BYTES);
     HStore store = region.getStore(COLUMN_FAMILY_BYTES);
-    assertEquals(0, region.getMemStoreSize());
+    assertEquals(0, region.getMemStoreDataSize());
 
     // Put one value
     byte [] value = Bytes.toBytes(method);
     Put put = new Put(value);
     put.addColumn(COLUMN_FAMILY_BYTES, Bytes.toBytes("abc"), value);
     region.put(put);
-    long onePutSize = region.getMemStoreSize();
+    long onePutSize = region.getMemStoreDataSize();
     assertTrue(onePutSize > 0);
 
     RegionCoprocessorHost mockedCPHost = Mockito.mock(RegionCoprocessorHost.class);
@@ -414,12 +426,42 @@ public class TestHRegion {
     } catch (IOException expected) {
     }
     long expectedSize = onePutSize * 2;
-    assertEquals("memstoreSize should be incremented", expectedSize, region.getMemStoreSize());
-    assertEquals("flushable size should be incremented", expectedSize,
-        store.getFlushableSize().getDataSize());
+    assertEquals("memstoreSize should be incremented",
+        expectedSize, region.getMemStoreDataSize());
+    assertEquals("flushable size should be incremented",
+        expectedSize, store.getFlushableSize().getDataSize());
 
     region.setCoprocessorHost(null);
-    HBaseTestingUtility.closeRegionAndWAL(region);
+  }
+
+  /**
+   * A test case of HBASE-21041
+   * @throws Exception Exception
+   */
+  @Test
+  public void testFlushAndMemstoreSizeCounting() throws Exception {
+    byte[] family = Bytes.toBytes("family");
+    this.region = initHRegion(tableName, method, CONF, family);
+    final WALFactory wals = new WALFactory(CONF, method);
+    try {
+      for (byte[] row : HBaseTestingUtility.ROWS) {
+        Put put = new Put(row);
+        put.addColumn(family, family, row);
+        region.put(put);
+      }
+      region.flush(true);
+      // After flush, data size should be zero
+      assertEquals(0, region.getMemStoreDataSize());
+      // After flush, a new active mutable segment is created, so the heap size
+      // should equal to MutableSegment.DEEP_OVERHEAD
+      assertEquals(MutableSegment.DEEP_OVERHEAD, region.getMemStoreHeapSize());
+      // After flush, offheap should be zero
+      assertEquals(0, region.getMemStoreOffHeapSize());
+    } finally {
+      HBaseTestingUtility.closeRegionAndWAL(this.region);
+      this.region = null;
+      wals.close();
+    }
   }
 
   /**
@@ -459,13 +501,13 @@ public class TestHRegion {
           // Initialize region
           region = initHRegion(tableName, null, null, false, Durability.SYNC_WAL, wal,
               COLUMN_FAMILY_BYTES);
-          long size = region.getMemStoreSize();
+          long size = region.getMemStoreDataSize();
           Assert.assertEquals(0, size);
           // Put one item into memstore.  Measure the size of one item in memstore.
           Put p1 = new Put(row);
           p1.add(new KeyValue(row, COLUMN_FAMILY_BYTES, qual1, 1, (byte[]) null));
           region.put(p1);
-          final long sizeOfOnePut = region.getMemStoreSize();
+          final long sizeOfOnePut = region.getMemStoreDataSize();
           // Fail a flush which means the current memstore will hang out as memstore 'snapshot'.
           try {
             LOG.info("Flushing");
@@ -478,7 +520,7 @@ public class TestHRegion {
           // Make it so all writes succeed from here on out
           ffs.fault.set(false);
           // Check sizes.  Should still be the one entry.
-          Assert.assertEquals(sizeOfOnePut, region.getMemStoreSize());
+          Assert.assertEquals(sizeOfOnePut, region.getMemStoreDataSize());
           // Now add two entries so that on this next flush that fails, we can see if we
           // subtract the right amount, the snapshot size only.
           Put p2 = new Put(row);
@@ -486,13 +528,13 @@ public class TestHRegion {
           p2.add(new KeyValue(row, COLUMN_FAMILY_BYTES, qual3, 3, (byte[])null));
           region.put(p2);
           long expectedSize = sizeOfOnePut * 3;
-          Assert.assertEquals(expectedSize, region.getMemStoreSize());
+          Assert.assertEquals(expectedSize, region.getMemStoreDataSize());
           // Do a successful flush.  It will clear the snapshot only.  Thats how flushes work.
           // If already a snapshot, we clear it else we move the memstore to be snapshot and flush
           // it
           region.flush(true);
           // Make sure our memory accounting is right.
-          Assert.assertEquals(sizeOfOnePut * 2, region.getMemStoreSize());
+          Assert.assertEquals(sizeOfOnePut * 2, region.getMemStoreDataSize());
         } finally {
           HBaseTestingUtility.closeRegionAndWAL(region);
         }
@@ -524,7 +566,7 @@ public class TestHRegion {
           // Initialize region
           region = initHRegion(tableName, null, null, false,
               Durability.SYNC_WAL, wal, COLUMN_FAMILY_BYTES);
-          long size = region.getMemStoreSize();
+          long size = region.getMemStoreDataSize();
           Assert.assertEquals(0, size);
           // Put one item into memstore.  Measure the size of one item in memstore.
           Put p1 = new Put(row);
@@ -541,7 +583,8 @@ public class TestHRegion {
           p2.add(new KeyValue(row, COLUMN_FAMILY_BYTES, qual3, 3, (byte[])null));
           region.put(p2);
           // Now try close on top of a failing flush.
-          region.close();
+          HBaseTestingUtility.closeRegionAndWAL(region);
+          region = null;
           fail();
         } catch (DroppedSnapshotException dse) {
           // Expected
@@ -645,7 +688,7 @@ public class TestHRegion {
       FileSystem fs = region.getRegionFileSystem().getFileSystem();
       byte[] regionName = region.getRegionInfo().getEncodedNameAsBytes();
 
-      Path recoveredEditsDir = WALSplitter.getRegionDirRecoveredEditsDir(regiondir);
+      Path recoveredEditsDir = WALSplitUtil.getRegionDirRecoveredEditsDir(regiondir);
 
       long maxSeqId = 1050;
       long minSeqId = 1000;
@@ -669,7 +712,7 @@ public class TestHRegion {
       for (HStore store : region.getStores()) {
         maxSeqIdInStores.put(Bytes.toBytes(store.getColumnFamilyName()), minSeqId - 1);
       }
-      long seqId = region.replayRecoveredEditsIfAny(regiondir, maxSeqIdInStores, null, status);
+      long seqId = region.replayRecoveredEditsIfAny(maxSeqIdInStores, null, status);
       assertEquals(maxSeqId, seqId);
       region.getMVCC().advanceTo(seqId);
       Get get = new Get(row);
@@ -696,7 +739,7 @@ public class TestHRegion {
       FileSystem fs = region.getRegionFileSystem().getFileSystem();
       byte[] regionName = region.getRegionInfo().getEncodedNameAsBytes();
 
-      Path recoveredEditsDir = WALSplitter.getRegionDirRecoveredEditsDir(regiondir);
+      Path recoveredEditsDir = WALSplitUtil.getRegionDirRecoveredEditsDir(regiondir);
 
       long maxSeqId = 1050;
       long minSeqId = 1000;
@@ -721,7 +764,7 @@ public class TestHRegion {
       for (HStore store : region.getStores()) {
         maxSeqIdInStores.put(Bytes.toBytes(store.getColumnFamilyName()), recoverSeqId - 1);
       }
-      long seqId = region.replayRecoveredEditsIfAny(regiondir, maxSeqIdInStores, null, status);
+      long seqId = region.replayRecoveredEditsIfAny(maxSeqIdInStores, null, status);
       assertEquals(maxSeqId, seqId);
       region.getMVCC().advanceTo(seqId);
       Get get = new Get(row);
@@ -746,32 +789,27 @@ public class TestHRegion {
   public void testSkipRecoveredEditsReplayAllIgnored() throws Exception {
     byte[] family = Bytes.toBytes("family");
     this.region = initHRegion(tableName, method, CONF, family);
-    try {
-      Path regiondir = region.getRegionFileSystem().getRegionDir();
-      FileSystem fs = region.getRegionFileSystem().getFileSystem();
+    Path regiondir = region.getRegionFileSystem().getRegionDir();
+    FileSystem fs = region.getRegionFileSystem().getFileSystem();
 
-      Path recoveredEditsDir = WALSplitter.getRegionDirRecoveredEditsDir(regiondir);
-      for (int i = 1000; i < 1050; i += 10) {
-        Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", i));
-        FSDataOutputStream dos = fs.create(recoveredEdits);
-        dos.writeInt(i);
-        dos.close();
-      }
-      long minSeqId = 2000;
-      Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", minSeqId - 1));
+    Path recoveredEditsDir = WALSplitUtil.getRegionDirRecoveredEditsDir(regiondir);
+    for (int i = 1000; i < 1050; i += 10) {
+      Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", i));
       FSDataOutputStream dos = fs.create(recoveredEdits);
+      dos.writeInt(i);
       dos.close();
-
-      Map<byte[], Long> maxSeqIdInStores = new TreeMap<>(Bytes.BYTES_COMPARATOR);
-      for (HStore store : region.getStores()) {
-        maxSeqIdInStores.put(Bytes.toBytes(store.getColumnFamilyName()), minSeqId);
-      }
-      long seqId = region.replayRecoveredEditsIfAny(regiondir, maxSeqIdInStores, null, null);
-      assertEquals(minSeqId, seqId);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
     }
+    long minSeqId = 2000;
+    Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", minSeqId - 1));
+    FSDataOutputStream dos = fs.create(recoveredEdits);
+    dos.close();
+
+    Map<byte[], Long> maxSeqIdInStores = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+    for (HStore store : region.getStores()) {
+      maxSeqIdInStores.put(Bytes.toBytes(store.getColumnFamilyName()), minSeqId);
+    }
+    long seqId = region.replayRecoveredEditsIfAny(maxSeqIdInStores, null, null);
+    assertEquals(minSeqId, seqId);
   }
 
   @Test
@@ -787,7 +825,7 @@ public class TestHRegion {
 
       assertEquals(0, region.getStoreFileList(columns).size());
 
-      Path recoveredEditsDir = WALSplitter.getRegionDirRecoveredEditsDir(regiondir);
+      Path recoveredEditsDir = WALSplitUtil.getRegionDirRecoveredEditsDir(regiondir);
 
       long maxSeqId = 1050;
       long minSeqId = 1000;
@@ -824,7 +862,7 @@ public class TestHRegion {
       for (HStore store : region.getStores()) {
         maxSeqIdInStores.put(Bytes.toBytes(store.getColumnFamilyName()), recoverSeqId - 1);
       }
-      long seqId = region.replayRecoveredEditsIfAny(regiondir, maxSeqIdInStores, null, status);
+      long seqId = region.replayRecoveredEditsIfAny(maxSeqIdInStores, null, status);
       assertEquals(maxSeqId, seqId);
 
       // assert that the files are flushed
@@ -903,7 +941,7 @@ public class TestHRegion {
       WALUtil.writeCompactionMarker(region.getWAL(), this.region.getReplicationScope(),
           this.region.getRegionInfo(), compactionDescriptor, region.getMVCC());
 
-      Path recoveredEditsDir = WALSplitter.getRegionDirRecoveredEditsDir(regiondir);
+      Path recoveredEditsDir = WALSplitUtil.getRegionDirRecoveredEditsDir(regiondir);
 
       Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", 1000));
       fs.create(recoveredEdits);
@@ -919,7 +957,7 @@ public class TestHRegion {
       // close the region now, and reopen again
       region.getTableDescriptor();
       region.getRegionInfo();
-      region.close();
+      HBaseTestingUtility.closeRegionAndWAL(this.region);
       try {
         region = HRegion.openHRegion(region, null);
       } catch (WrongRegionException wre) {
@@ -1028,7 +1066,7 @@ public class TestHRegion {
 
         // now write those markers to the recovered edits again.
 
-        Path recoveredEditsDir = WALSplitter.getRegionDirRecoveredEditsDir(regiondir);
+        Path recoveredEditsDir = WALSplitUtil.getRegionDirRecoveredEditsDir(regiondir);
 
         Path recoveredEdits = new Path(recoveredEditsDir, String.format("%019d", 1000));
         fs.create(recoveredEdits);
@@ -1049,9 +1087,8 @@ public class TestHRegion {
         }
       }
 
-
       // close the region now, and reopen again
-      region.close();
+      HBaseTestingUtility.closeRegionAndWAL(this.region);
       region = HRegion.openHRegion(region, null);
 
       // now check whether we have can read back the data from region
@@ -1132,8 +1169,8 @@ public class TestHRegion {
           }
 
           @Override
-          public void sync() throws IOException {
-            w.sync();
+          public void sync(boolean forceSync) throws IOException {
+            w.sync(forceSync);
           }
 
           @Override
@@ -1162,60 +1199,54 @@ public class TestHRegion {
     FailAppendFlushMarkerWAL wal =
       new FailAppendFlushMarkerWAL(FileSystem.get(walConf), FSUtils.getRootDir(walConf),
         method, walConf);
+    wal.init();
     this.region = initHRegion(tableName, HConstants.EMPTY_START_ROW,
       HConstants.EMPTY_END_ROW, false, Durability.USE_DEFAULT, wal, family);
+    int i = 0;
+    Put put = new Put(Bytes.toBytes(i));
+    put.setDurability(Durability.SKIP_WAL); // have to skip mocked wal
+    put.addColumn(family, Bytes.toBytes(i), Bytes.toBytes(i));
+    region.put(put);
+
+    // 1. Test case where START_FLUSH throws exception
+    wal.flushActions = new FlushAction [] {FlushAction.START_FLUSH};
+
+    // start cache flush will throw exception
     try {
-      int i = 0;
-      Put put = new Put(Bytes.toBytes(i));
-      put.setDurability(Durability.SKIP_WAL); // have to skip mocked wal
-      put.addColumn(family, Bytes.toBytes(i), Bytes.toBytes(i));
-      region.put(put);
+      region.flush(true);
+      fail("This should have thrown exception");
+    } catch (DroppedSnapshotException unexpected) {
+      // this should not be a dropped snapshot exception. Meaning that RS will not abort
+      throw unexpected;
+    } catch (IOException expected) {
+      // expected
+    }
+    // The WAL is hosed now. It has two edits appended. We cannot roll the log without it
+    // throwing a DroppedSnapshotException to force an abort. Just clean up the mess.
+    region.close(true);
+    wal.close();
 
-      // 1. Test case where START_FLUSH throws exception
-      wal.flushActions = new FlushAction [] {FlushAction.START_FLUSH};
+    // 2. Test case where START_FLUSH succeeds but COMMIT_FLUSH will throw exception
+    wal.flushActions = new FlushAction [] {FlushAction.COMMIT_FLUSH};
+    wal = new FailAppendFlushMarkerWAL(FileSystem.get(walConf), FSUtils.getRootDir(walConf),
+          method, walConf);
+    wal.init();
+    this.region = initHRegion(tableName, HConstants.EMPTY_START_ROW,
+      HConstants.EMPTY_END_ROW, false, Durability.USE_DEFAULT, wal, family);
+    region.put(put);
+    // 3. Test case where ABORT_FLUSH will throw exception.
+    // Even if ABORT_FLUSH throws exception, we should not fail with IOE, but continue with
+    // DroppedSnapshotException. Below COMMIT_FLUSH will cause flush to abort
+    wal.flushActions = new FlushAction [] {FlushAction.COMMIT_FLUSH, FlushAction.ABORT_FLUSH};
 
-      // start cache flush will throw exception
-      try {
-        region.flush(true);
-        fail("This should have thrown exception");
-      } catch (DroppedSnapshotException unexpected) {
-        // this should not be a dropped snapshot exception. Meaning that RS will not abort
-        throw unexpected;
-      } catch (IOException expected) {
-        // expected
-      }
-      // The WAL is hosed now. It has two edits appended. We cannot roll the log without it
-      // throwing a DroppedSnapshotException to force an abort. Just clean up the mess.
-      region.close(true);
-      wal.close();
-
-      // 2. Test case where START_FLUSH succeeds but COMMIT_FLUSH will throw exception
-      wal.flushActions = new FlushAction [] {FlushAction.COMMIT_FLUSH};
-      wal = new FailAppendFlushMarkerWAL(FileSystem.get(walConf), FSUtils.getRootDir(walConf),
-            method, walConf);
-
-      this.region = initHRegion(tableName, HConstants.EMPTY_START_ROW,
-        HConstants.EMPTY_END_ROW, false, Durability.USE_DEFAULT, wal, family);
-      region.put(put);
-
-      // 3. Test case where ABORT_FLUSH will throw exception.
-      // Even if ABORT_FLUSH throws exception, we should not fail with IOE, but continue with
-      // DroppedSnapshotException. Below COMMMIT_FLUSH will cause flush to abort
-      wal.flushActions = new FlushAction [] {FlushAction.COMMIT_FLUSH, FlushAction.ABORT_FLUSH};
-
-      try {
-        region.flush(true);
-        fail("This should have thrown exception");
-      } catch (DroppedSnapshotException expected) {
-        // we expect this exception, since we were able to write the snapshot, but failed to
-        // write the flush marker to WAL
-      } catch (IOException unexpected) {
-        throw unexpected;
-      }
-
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    try {
+      region.flush(true);
+      fail("This should have thrown exception");
+    } catch (DroppedSnapshotException expected) {
+      // we expect this exception, since we were able to write the snapshot, but failed to
+      // write the flush marker to WAL
+    } catch (IOException unexpected) {
+      throw unexpected;
     }
   }
 
@@ -1227,50 +1258,46 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, hc, families);
+    // Put data in region
+    final int startRow = 100;
+    putData(startRow, numRows, qual1, families);
+    putData(startRow, numRows, qual2, families);
+    putData(startRow, numRows, qual3, families);
+    final AtomicBoolean done = new AtomicBoolean(false);
+    final AtomicInteger gets = new AtomicInteger(0);
+    GetTillDoneOrException[] threads = new GetTillDoneOrException[10];
     try {
-      // Put data in region
-      final int startRow = 100;
-      putData(startRow, numRows, qual1, families);
-      putData(startRow, numRows, qual2, families);
-      putData(startRow, numRows, qual3, families);
-      final AtomicBoolean done = new AtomicBoolean(false);
-      final AtomicInteger gets = new AtomicInteger(0);
-      GetTillDoneOrException[] threads = new GetTillDoneOrException[10];
-      try {
-        // Set ten threads running concurrently getting from the region.
-        for (int i = 0; i < threads.length / 2; i++) {
-          threads[i] = new GetTillDoneOrException(i, Bytes.toBytes("" + startRow), done, gets);
-          threads[i].setDaemon(true);
-          threads[i].start();
-        }
-        // Artificially make the condition by setting closing flag explicitly.
-        // I can't make the issue happen with a call to region.close().
-        this.region.closing.set(true);
-        for (int i = threads.length / 2; i < threads.length; i++) {
-          threads[i] = new GetTillDoneOrException(i, Bytes.toBytes("" + startRow), done, gets);
-          threads[i].setDaemon(true);
-          threads[i].start();
-        }
-      } finally {
-        if (this.region != null) {
-          HBaseTestingUtility.closeRegionAndWAL(this.region);
-        }
+      // Set ten threads running concurrently getting from the region.
+      for (int i = 0; i < threads.length / 2; i++) {
+        threads[i] = new GetTillDoneOrException(i, Bytes.toBytes("" + startRow), done, gets);
+        threads[i].setDaemon(true);
+        threads[i].start();
       }
-      done.set(true);
-      for (GetTillDoneOrException t : threads) {
-        try {
-          t.join();
-        } catch (InterruptedException e) {
-          e.printStackTrace();
-        }
-        if (t.e != null) {
-          LOG.info("Exception=" + t.e);
-          assertFalse("Found a NPE in " + t.getName(), t.e instanceof NullPointerException);
-        }
+      // Artificially make the condition by setting closing flag explicitly.
+      // I can't make the issue happen with a call to region.close().
+      this.region.closing.set(true);
+      for (int i = threads.length / 2; i < threads.length; i++) {
+        threads[i] = new GetTillDoneOrException(i, Bytes.toBytes("" + startRow), done, gets);
+        threads[i].setDaemon(true);
+        threads[i].start();
       }
     } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+      if (this.region != null) {
+        HBaseTestingUtility.closeRegionAndWAL(this.region);
+        this.region = null;
+      }
+    }
+    done.set(true);
+    for (GetTillDoneOrException t : threads) {
+      try {
+        t.join();
+      } catch (InterruptedException e) {
+        e.printStackTrace();
+      }
+      if (t.e != null) {
+        LOG.info("Exception=" + t.e);
+        assertFalse("Found a NPE in " + t.getName(), t.e instanceof NullPointerException);
+      }
     }
   }
 
@@ -1315,41 +1342,36 @@ public class TestHRegion {
     byte[][] FAMILIES = new byte[][] { Bytes.toBytes("trans-blob"), Bytes.toBytes("trans-type"),
         Bytes.toBytes("trans-date"), Bytes.toBytes("trans-tags"), Bytes.toBytes("trans-group") };
     this.region = initHRegion(tableName, method, CONF, FAMILIES);
-    try {
-      String value = "this is the value";
-      String value2 = "this is some other value";
-      String keyPrefix1 = "prefix1";
-      String keyPrefix2 = "prefix2";
-      String keyPrefix3 = "prefix3";
-      putRows(this.region, 3, value, keyPrefix1);
-      putRows(this.region, 3, value, keyPrefix2);
-      putRows(this.region, 3, value, keyPrefix3);
-      putRows(this.region, 3, value2, keyPrefix1);
-      putRows(this.region, 3, value2, keyPrefix2);
-      putRows(this.region, 3, value2, keyPrefix3);
-      System.out.println("Checking values for key: " + keyPrefix1);
-      assertEquals("Got back incorrect number of rows from scan", 3,
-          getNumberOfRows(keyPrefix1, value2, this.region));
-      System.out.println("Checking values for key: " + keyPrefix2);
-      assertEquals("Got back incorrect number of rows from scan", 3,
-          getNumberOfRows(keyPrefix2, value2, this.region));
-      System.out.println("Checking values for key: " + keyPrefix3);
-      assertEquals("Got back incorrect number of rows from scan", 3,
-          getNumberOfRows(keyPrefix3, value2, this.region));
-      deleteColumns(this.region, value2, keyPrefix1);
-      deleteColumns(this.region, value2, keyPrefix2);
-      deleteColumns(this.region, value2, keyPrefix3);
-      System.out.println("Starting important checks.....");
-      assertEquals("Got back incorrect number of rows from scan: " + keyPrefix1, 0,
-          getNumberOfRows(keyPrefix1, value2, this.region));
-      assertEquals("Got back incorrect number of rows from scan: " + keyPrefix2, 0,
-          getNumberOfRows(keyPrefix2, value2, this.region));
-      assertEquals("Got back incorrect number of rows from scan: " + keyPrefix3, 0,
-          getNumberOfRows(keyPrefix3, value2, this.region));
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    String value = "this is the value";
+    String value2 = "this is some other value";
+    String keyPrefix1 = "prefix1";
+    String keyPrefix2 = "prefix2";
+    String keyPrefix3 = "prefix3";
+    putRows(this.region, 3, value, keyPrefix1);
+    putRows(this.region, 3, value, keyPrefix2);
+    putRows(this.region, 3, value, keyPrefix3);
+    putRows(this.region, 3, value2, keyPrefix1);
+    putRows(this.region, 3, value2, keyPrefix2);
+    putRows(this.region, 3, value2, keyPrefix3);
+    System.out.println("Checking values for key: " + keyPrefix1);
+    assertEquals("Got back incorrect number of rows from scan", 3,
+        getNumberOfRows(keyPrefix1, value2, this.region));
+    System.out.println("Checking values for key: " + keyPrefix2);
+    assertEquals("Got back incorrect number of rows from scan", 3,
+        getNumberOfRows(keyPrefix2, value2, this.region));
+    System.out.println("Checking values for key: " + keyPrefix3);
+    assertEquals("Got back incorrect number of rows from scan", 3,
+        getNumberOfRows(keyPrefix3, value2, this.region));
+    deleteColumns(this.region, value2, keyPrefix1);
+    deleteColumns(this.region, value2, keyPrefix2);
+    deleteColumns(this.region, value2, keyPrefix3);
+    System.out.println("Starting important checks.....");
+    assertEquals("Got back incorrect number of rows from scan: " + keyPrefix1, 0,
+        getNumberOfRows(keyPrefix1, value2, this.region));
+    assertEquals("Got back incorrect number of rows from scan: " + keyPrefix2, 0,
+        getNumberOfRows(keyPrefix2, value2, this.region));
+    assertEquals("Got back incorrect number of rows from scan: " + keyPrefix3, 0,
+        getNumberOfRows(keyPrefix3, value2, this.region));
   }
 
   @Test
@@ -1365,9 +1387,6 @@ public class TestHRegion {
       region.append(append);
     } catch (IOException e) {
       exceptionCaught = true;
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
     }
     assertTrue(exceptionCaught == true);
   }
@@ -1384,9 +1403,6 @@ public class TestHRegion {
       region.increment(inc);
     } catch (IOException e) {
       exceptionCaught = true;
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
     }
     assertTrue(exceptionCaught == true);
   }
@@ -1468,130 +1484,116 @@ public class TestHRegion {
   public void testFamilyWithAndWithoutColon() throws Exception {
     byte[] cf = Bytes.toBytes(COLUMN_FAMILY);
     this.region = initHRegion(tableName, method, CONF, cf);
+    Put p = new Put(tableName.toBytes());
+    byte[] cfwithcolon = Bytes.toBytes(COLUMN_FAMILY + ":");
+    p.addColumn(cfwithcolon, cfwithcolon, cfwithcolon);
+    boolean exception = false;
     try {
-      Put p = new Put(tableName.toBytes());
-      byte[] cfwithcolon = Bytes.toBytes(COLUMN_FAMILY + ":");
-      p.addColumn(cfwithcolon, cfwithcolon, cfwithcolon);
-      boolean exception = false;
-      try {
-        this.region.put(p);
-      } catch (NoSuchColumnFamilyException e) {
-        exception = true;
-      }
-      assertTrue(exception);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+      this.region.put(p);
+    } catch (NoSuchColumnFamilyException e) {
+      exception = true;
     }
+    assertTrue(exception);
   }
 
   @Test
   public void testBatchPut_whileNoRowLocksHeld() throws IOException {
     final Put[] puts = new Put[10];
     MetricsWALSource source = CompatibilitySingletonFactory.getInstance(MetricsWALSource.class);
-    try {
-      long syncs = prepareRegionForBachPut(puts, source, false);
+    long syncs = prepareRegionForBachPut(puts, source, false);
 
-      OperationStatus[] codes = this.region.batchMutate(puts);
-      assertEquals(10, codes.length);
-      for (int i = 0; i < 10; i++) {
-        assertEquals(OperationStatusCode.SUCCESS, codes[i].getOperationStatusCode());
-      }
-      metricsAssertHelper.assertCounter("syncTimeNumOps", syncs + 1, source);
-
-      LOG.info("Next a batch put with one invalid family");
-      puts[5].addColumn(Bytes.toBytes("BAD_CF"), qual, value);
-      codes = this.region.batchMutate(puts);
-      assertEquals(10, codes.length);
-      for (int i = 0; i < 10; i++) {
-        assertEquals((i == 5) ? OperationStatusCode.BAD_FAMILY : OperationStatusCode.SUCCESS,
-            codes[i].getOperationStatusCode());
-      }
-
-      metricsAssertHelper.assertCounter("syncTimeNumOps", syncs + 2, source);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    OperationStatus[] codes = this.region.batchMutate(puts);
+    assertEquals(10, codes.length);
+    for (int i = 0; i < 10; i++) {
+      assertEquals(OperationStatusCode.SUCCESS, codes[i].getOperationStatusCode());
     }
+    metricsAssertHelper.assertCounter("syncTimeNumOps", syncs + 1, source);
+
+    LOG.info("Next a batch put with one invalid family");
+    puts[5].addColumn(Bytes.toBytes("BAD_CF"), qual, value);
+    codes = this.region.batchMutate(puts);
+    assertEquals(10, codes.length);
+    for (int i = 0; i < 10; i++) {
+      assertEquals((i == 5) ? OperationStatusCode.BAD_FAMILY : OperationStatusCode.SUCCESS,
+          codes[i].getOperationStatusCode());
+    }
+
+    metricsAssertHelper.assertCounter("syncTimeNumOps", syncs + 2, source);
   }
 
   @Test
   public void testBatchPut_whileMultipleRowLocksHeld() throws Exception {
     final Put[] puts = new Put[10];
     MetricsWALSource source = CompatibilitySingletonFactory.getInstance(MetricsWALSource.class);
-    try {
-      long syncs = prepareRegionForBachPut(puts, source, false);
+    long syncs = prepareRegionForBachPut(puts, source, false);
 
-      puts[5].addColumn(Bytes.toBytes("BAD_CF"), qual, value);
+    puts[5].addColumn(Bytes.toBytes("BAD_CF"), qual, value);
 
-      LOG.info("batchPut will have to break into four batches to avoid row locks");
-      RowLock rowLock1 = region.getRowLock(Bytes.toBytes("row_2"));
-      RowLock rowLock2 = region.getRowLock(Bytes.toBytes("row_1"));
-      RowLock rowLock3 = region.getRowLock(Bytes.toBytes("row_3"));
-      RowLock rowLock4 = region.getRowLock(Bytes.toBytes("row_3"), true);
+    LOG.info("batchPut will have to break into four batches to avoid row locks");
+    RowLock rowLock1 = region.getRowLock(Bytes.toBytes("row_2"));
+    RowLock rowLock2 = region.getRowLock(Bytes.toBytes("row_1"));
+    RowLock rowLock3 = region.getRowLock(Bytes.toBytes("row_3"));
+    RowLock rowLock4 = region.getRowLock(Bytes.toBytes("row_3"), true);
 
-      MultithreadedTestUtil.TestContext ctx = new MultithreadedTestUtil.TestContext(CONF);
-      final AtomicReference<OperationStatus[]> retFromThread = new AtomicReference<>();
-      final CountDownLatch startingPuts = new CountDownLatch(1);
-      final CountDownLatch startingClose = new CountDownLatch(1);
-      TestThread putter = new TestThread(ctx) {
-        @Override
-        public void doWork() throws IOException {
-          startingPuts.countDown();
-          retFromThread.set(region.batchMutate(puts));
-        }
-      };
-      LOG.info("...starting put thread while holding locks");
-      ctx.addThread(putter);
-      ctx.startThreads();
-
-      // Now attempt to close the region from another thread.  Prior to HBASE-12565
-      // this would cause the in-progress batchMutate operation to to fail with
-      // exception because it use to release and re-acquire the close-guard lock
-      // between batches.  Caller then didn't get status indicating which writes succeeded.
-      // We now expect this thread to block until the batchMutate call finishes.
-      Thread regionCloseThread = new TestThread(ctx) {
-        @Override
-        public void doWork() {
-          try {
-            startingPuts.await();
-            // Give some time for the batch mutate to get in.
-            // We don't want to race with the mutate
-            Thread.sleep(10);
-            startingClose.countDown();
-            HBaseTestingUtility.closeRegionAndWAL(region);
-          } catch (IOException e) {
-            throw new RuntimeException(e);
-          } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-          }
-        }
-      };
-      regionCloseThread.start();
-
-      startingClose.await();
-      startingPuts.await();
-      Thread.sleep(100);
-      LOG.info("...releasing row lock 1, which should let put thread continue");
-      rowLock1.release();
-      rowLock2.release();
-      rowLock3.release();
-      waitForCounter(source, "syncTimeNumOps", syncs + 1);
-
-      LOG.info("...joining on put thread");
-      ctx.stop();
-      regionCloseThread.join();
-
-      OperationStatus[] codes = retFromThread.get();
-      for (int i = 0; i < codes.length; i++) {
-        assertEquals((i == 5) ? OperationStatusCode.BAD_FAMILY : OperationStatusCode.SUCCESS,
-            codes[i].getOperationStatusCode());
+    MultithreadedTestUtil.TestContext ctx = new MultithreadedTestUtil.TestContext(CONF);
+    final AtomicReference<OperationStatus[]> retFromThread = new AtomicReference<>();
+    final CountDownLatch startingPuts = new CountDownLatch(1);
+    final CountDownLatch startingClose = new CountDownLatch(1);
+    TestThread putter = new TestThread(ctx) {
+      @Override
+      public void doWork() throws IOException {
+        startingPuts.countDown();
+        retFromThread.set(region.batchMutate(puts));
       }
-      rowLock4.release();
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    };
+    LOG.info("...starting put thread while holding locks");
+    ctx.addThread(putter);
+    ctx.startThreads();
+
+    // Now attempt to close the region from another thread.  Prior to HBASE-12565
+    // this would cause the in-progress batchMutate operation to to fail with
+    // exception because it use to release and re-acquire the close-guard lock
+    // between batches.  Caller then didn't get status indicating which writes succeeded.
+    // We now expect this thread to block until the batchMutate call finishes.
+    Thread regionCloseThread = new TestThread(ctx) {
+      @Override
+      public void doWork() {
+        try {
+          startingPuts.await();
+          // Give some time for the batch mutate to get in.
+          // We don't want to race with the mutate
+          Thread.sleep(10);
+          startingClose.countDown();
+          HBaseTestingUtility.closeRegionAndWAL(region);
+          region = null;
+        } catch (IOException e) {
+          throw new RuntimeException(e);
+        } catch (InterruptedException e) {
+          throw new RuntimeException(e);
+        }
+      }
+    };
+    regionCloseThread.start();
+
+    startingClose.await();
+    startingPuts.await();
+    Thread.sleep(100);
+    LOG.info("...releasing row lock 1, which should let put thread continue");
+    rowLock1.release();
+    rowLock2.release();
+    rowLock3.release();
+    waitForCounter(source, "syncTimeNumOps", syncs + 1);
+
+    LOG.info("...joining on put thread");
+    ctx.stop();
+    regionCloseThread.join();
+
+    OperationStatus[] codes = retFromThread.get();
+    for (int i = 0; i < codes.length; i++) {
+      assertEquals((i == 5) ? OperationStatusCode.BAD_FAMILY : OperationStatusCode.SUCCESS,
+          codes[i].getOperationStatusCode());
     }
+    rowLock4.release();
   }
 
   private void waitForCounter(MetricsWALSource source, String metricName, long expectedCount)
@@ -1611,69 +1613,64 @@ public class TestHRegion {
   public void testAtomicBatchPut() throws IOException {
     final Put[] puts = new Put[10];
     MetricsWALSource source = CompatibilitySingletonFactory.getInstance(MetricsWALSource.class);
-    try {
-      long syncs = prepareRegionForBachPut(puts, source, false);
+    long syncs = prepareRegionForBachPut(puts, source, false);
 
-      // 1. Straight forward case, should succeed
-      MutationBatchOperation batchOp = new MutationBatchOperation(region, puts, true,
-          HConstants.NO_NONCE, HConstants.NO_NONCE);
-      OperationStatus[] codes = this.region.batchMutate(batchOp);
-      assertEquals(10, codes.length);
-      for (int i = 0; i < 10; i++) {
-        assertEquals(OperationStatusCode.SUCCESS, codes[i].getOperationStatusCode());
-      }
-      metricsAssertHelper.assertCounter("syncTimeNumOps", syncs + 1, source);
-
-      // 2. Failed to get lock
-      RowLock lock = region.getRowLock(Bytes.toBytes("row_" + 3));
-      // Method {@link HRegion#getRowLock(byte[])} is reentrant. As 'row_3' is locked in this
-      // thread, need to run {@link HRegion#batchMutate(HRegion.BatchOperation)} in different thread
-      MultithreadedTestUtil.TestContext ctx = new MultithreadedTestUtil.TestContext(CONF);
-      final AtomicReference<IOException> retFromThread = new AtomicReference<>();
-      final CountDownLatch finishedPuts = new CountDownLatch(1);
-      final MutationBatchOperation finalBatchOp = new MutationBatchOperation(region, puts, true,
-          HConstants
-          .NO_NONCE,
-          HConstants.NO_NONCE);
-      TestThread putter = new TestThread(ctx) {
-        @Override
-        public void doWork() throws IOException {
-          try {
-            region.batchMutate(finalBatchOp);
-          } catch (IOException ioe) {
-            LOG.error("test failed!", ioe);
-            retFromThread.set(ioe);
-          }
-          finishedPuts.countDown();
-        }
-      };
-      LOG.info("...starting put thread while holding locks");
-      ctx.addThread(putter);
-      ctx.startThreads();
-      LOG.info("...waiting for batch puts while holding locks");
-      try {
-        finishedPuts.await();
-      } catch (InterruptedException e) {
-        LOG.error("Interrupted!", e);
-      } finally {
-        if (lock != null) {
-          lock.release();
-        }
-      }
-      assertNotNull(retFromThread.get());
-      metricsAssertHelper.assertCounter("syncTimeNumOps", syncs + 1, source);
-
-      // 3. Exception thrown in validation
-      LOG.info("Next a batch put with one invalid family");
-      puts[5].addColumn(Bytes.toBytes("BAD_CF"), qual, value);
-      batchOp = new MutationBatchOperation(region, puts, true, HConstants.NO_NONCE,
-          HConstants.NO_NONCE);
-      thrown.expect(NoSuchColumnFamilyException.class);
-      this.region.batchMutate(batchOp);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // 1. Straight forward case, should succeed
+    MutationBatchOperation batchOp = new MutationBatchOperation(region, puts, true,
+        HConstants.NO_NONCE, HConstants.NO_NONCE);
+    OperationStatus[] codes = this.region.batchMutate(batchOp);
+    assertEquals(10, codes.length);
+    for (int i = 0; i < 10; i++) {
+      assertEquals(OperationStatusCode.SUCCESS, codes[i].getOperationStatusCode());
     }
+    metricsAssertHelper.assertCounter("syncTimeNumOps", syncs + 1, source);
+
+    // 2. Failed to get lock
+    RowLock lock = region.getRowLock(Bytes.toBytes("row_" + 3));
+    // Method {@link HRegion#getRowLock(byte[])} is reentrant. As 'row_3' is locked in this
+    // thread, need to run {@link HRegion#batchMutate(HRegion.BatchOperation)} in different thread
+    MultithreadedTestUtil.TestContext ctx = new MultithreadedTestUtil.TestContext(CONF);
+    final AtomicReference<IOException> retFromThread = new AtomicReference<>();
+    final CountDownLatch finishedPuts = new CountDownLatch(1);
+    final MutationBatchOperation finalBatchOp = new MutationBatchOperation(region, puts, true,
+        HConstants
+        .NO_NONCE,
+        HConstants.NO_NONCE);
+    TestThread putter = new TestThread(ctx) {
+      @Override
+      public void doWork() throws IOException {
+        try {
+          region.batchMutate(finalBatchOp);
+        } catch (IOException ioe) {
+          LOG.error("test failed!", ioe);
+          retFromThread.set(ioe);
+        }
+        finishedPuts.countDown();
+      }
+    };
+    LOG.info("...starting put thread while holding locks");
+    ctx.addThread(putter);
+    ctx.startThreads();
+    LOG.info("...waiting for batch puts while holding locks");
+    try {
+      finishedPuts.await();
+    } catch (InterruptedException e) {
+      LOG.error("Interrupted!", e);
+    } finally {
+      if (lock != null) {
+        lock.release();
+      }
+    }
+    assertNotNull(retFromThread.get());
+    metricsAssertHelper.assertCounter("syncTimeNumOps", syncs + 1, source);
+
+    // 3. Exception thrown in validation
+    LOG.info("Next a batch put with one invalid family");
+    puts[5].addColumn(Bytes.toBytes("BAD_CF"), qual, value);
+    batchOp = new MutationBatchOperation(region, puts, true, HConstants.NO_NONCE,
+        HConstants.NO_NONCE);
+    thrown.expect(NoSuchColumnFamilyException.class);
+    this.region.batchMutate(batchOp);
   }
 
   @Test
@@ -1683,19 +1680,14 @@ public class TestHRegion {
     final Put[] puts = new Put[10];
     MetricsWALSource source = CompatibilitySingletonFactory.getInstance(MetricsWALSource.class);
 
-    try {
-      long syncs = prepareRegionForBachPut(puts, source, true);
+    long syncs = prepareRegionForBachPut(puts, source, true);
 
-      OperationStatus[] codes = this.region.batchMutate(puts);
-      assertEquals(10, codes.length);
-      for (int i = 0; i < 10; i++) {
-        assertEquals(OperationStatusCode.SANITY_CHECK_FAILURE, codes[i].getOperationStatusCode());
-      }
-      metricsAssertHelper.assertCounter("syncTimeNumOps", syncs, source);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    OperationStatus[] codes = this.region.batchMutate(puts);
+    assertEquals(10, codes.length);
+    for (int i = 0; i < 10; i++) {
+      assertEquals(OperationStatusCode.SANITY_CHECK_FAILURE, codes[i].getOperationStatusCode());
     }
+    metricsAssertHelper.assertCounter("syncTimeNumOps", syncs, source);
   }
 
   /**
@@ -1731,67 +1723,62 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      // Putting empty data in key
-      Put put = new Put(row1);
-      put.addColumn(fam1, qf1, emptyVal);
+    // Putting empty data in key
+    Put put = new Put(row1);
+    put.addColumn(fam1, qf1, emptyVal);
 
-      // checkAndPut with empty value
-      boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(
-          emptyVal), put, true);
-      assertTrue(res);
+    // checkAndPut with empty value
+    boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(emptyVal), put);
+    assertTrue(res);
 
-      // Putting data in key
-      put = new Put(row1);
-      put.addColumn(fam1, qf1, val1);
+    // Putting data in key
+    put = new Put(row1);
+    put.addColumn(fam1, qf1, val1);
 
-      // checkAndPut with correct value
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(emptyVal),
-          put, true);
-      assertTrue(res);
+    // checkAndPut with correct value
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(emptyVal), put);
+    assertTrue(res);
 
-      // not empty anymore
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(emptyVal),
-          put, true);
-      assertFalse(res);
+    // not empty anymore
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(emptyVal), put);
+    assertFalse(res);
 
-      Delete delete = new Delete(row1);
-      delete.addColumn(fam1, qf1);
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(emptyVal),
-          delete, true);
-      assertFalse(res);
+    Delete delete = new Delete(row1);
+    delete.addColumn(fam1, qf1);
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(emptyVal), delete);
+    assertFalse(res);
 
-      put = new Put(row1);
-      put.addColumn(fam1, qf1, val2);
-      // checkAndPut with correct value
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(val1),
-          put, true);
-      assertTrue(res);
+    put = new Put(row1);
+    put.addColumn(fam1, qf1, val2);
+    // checkAndPut with correct value
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(val1), put);
+    assertTrue(res);
 
-      // checkAndDelete with correct value
-      delete = new Delete(row1);
-      delete.addColumn(fam1, qf1);
-      delete.addColumn(fam1, qf1);
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(val2),
-          delete, true);
-      assertTrue(res);
+    // checkAndDelete with correct value
+    delete = new Delete(row1);
+    delete.addColumn(fam1, qf1);
+    delete.addColumn(fam1, qf1);
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(val2), delete);
+    assertTrue(res);
 
-      delete = new Delete(row1);
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(emptyVal),
-          delete, true);
-      assertTrue(res);
+    delete = new Delete(row1);
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(emptyVal), delete);
+    assertTrue(res);
 
-      // checkAndPut looking for a null value
-      put = new Put(row1);
-      put.addColumn(fam1, qf1, val1);
+    // checkAndPut looking for a null value
+    put = new Put(row1);
+    put.addColumn(fam1, qf1, val1);
 
-      res = region
-          .checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new NullComparator(), put, true);
-      assertTrue(res);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    res = region
+        .checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new NullComparator(), put);
+    assertTrue(res);
   }
 
   @Test
@@ -1806,46 +1793,41 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      // Putting data in key
-      Put put = new Put(row1);
-      put.addColumn(fam1, qf1, val1);
-      region.put(put);
+    // Putting data in key
+    Put put = new Put(row1);
+    put.addColumn(fam1, qf1, val1);
+    region.put(put);
 
-      // checkAndPut with wrong value
-      boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(
-          val2), put, true);
-      assertEquals(false, res);
+    // checkAndPut with wrong value
+    boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(val2), put);
+    assertEquals(false, res);
 
-      // checkAndDelete with wrong value
-      Delete delete = new Delete(row1);
-      delete.addFamily(fam1);
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(val2),
-          put, true);
-      assertEquals(false, res);
+    // checkAndDelete with wrong value
+    Delete delete = new Delete(row1);
+    delete.addFamily(fam1);
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(val2), put);
+    assertEquals(false, res);
 
-      // Putting data in key
-      put = new Put(row1);
-      put.addColumn(fam1, qf1, Bytes.toBytes(bd1));
-      region.put(put);
+    // Putting data in key
+    put = new Put(row1);
+    put.addColumn(fam1, qf1, Bytes.toBytes(bd1));
+    region.put(put);
 
-      // checkAndPut with wrong value
-      res =
-          region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BigDecimalComparator(
-              bd2), put, true);
-      assertEquals(false, res);
+    // checkAndPut with wrong value
+    res =
+        region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+            new BigDecimalComparator(bd2), put);
+    assertEquals(false, res);
 
-      // checkAndDelete with wrong value
-      delete = new Delete(row1);
-      delete.addFamily(fam1);
-      res =
-          region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BigDecimalComparator(
-              bd2), put, true);
-      assertEquals(false, res);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    // checkAndDelete with wrong value
+    delete = new Delete(row1);
+    delete.addFamily(fam1);
+    res =
+        region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+            new BigDecimalComparator(bd2), put);
+    assertEquals(false, res);
   }
 
   @Test
@@ -1858,46 +1840,41 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      // Putting data in key
-      Put put = new Put(row1);
-      put.addColumn(fam1, qf1, val1);
-      region.put(put);
+    // Putting data in key
+    Put put = new Put(row1);
+    put.addColumn(fam1, qf1, val1);
+    region.put(put);
 
-      // checkAndPut with correct value
-      boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(
-          val1), put, true);
-      assertEquals(true, res);
+    // checkAndPut with correct value
+    boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(val1), put);
+    assertEquals(true, res);
 
-      // checkAndDelete with correct value
-      Delete delete = new Delete(row1);
-      delete.addColumn(fam1, qf1);
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(val1),
-          delete, true);
-      assertEquals(true, res);
+    // checkAndDelete with correct value
+    Delete delete = new Delete(row1);
+    delete.addColumn(fam1, qf1);
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(val1),
+        delete);
+    assertEquals(true, res);
 
-      // Putting data in key
-      put = new Put(row1);
-      put.addColumn(fam1, qf1, Bytes.toBytes(bd1));
-      region.put(put);
+    // Putting data in key
+    put = new Put(row1);
+    put.addColumn(fam1, qf1, Bytes.toBytes(bd1));
+    region.put(put);
 
-      // checkAndPut with correct value
-      res =
-          region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BigDecimalComparator(
-              bd1), put, true);
-      assertEquals(true, res);
+    // checkAndPut with correct value
+    res =
+        region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BigDecimalComparator(
+            bd1), put);
+    assertEquals(true, res);
 
-      // checkAndDelete with correct value
-      delete = new Delete(row1);
-      delete.addColumn(fam1, qf1);
-      res =
-          region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BigDecimalComparator(
-              bd1), delete, true);
-      assertEquals(true, res);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    // checkAndDelete with correct value
+    delete = new Delete(row1);
+    delete.addColumn(fam1, qf1);
+    res =
+        region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BigDecimalComparator(
+            bd1), delete);
+    assertEquals(true, res);
   }
 
   @Test
@@ -1912,86 +1889,81 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      // Putting val3 in key
-      Put put = new Put(row1);
-      put.addColumn(fam1, qf1, val3);
-      region.put(put);
+    // Putting val3 in key
+    Put put = new Put(row1);
+    put.addColumn(fam1, qf1, val3);
+    region.put(put);
 
-      // Test CompareOp.LESS: original = val3, compare with val3, fail
-      boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS,
-          new BinaryComparator(val3), put, true);
-      assertEquals(false, res);
+    // Test CompareOp.LESS: original = val3, compare with val3, fail
+    boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS,
+        new BinaryComparator(val3), put);
+    assertEquals(false, res);
 
-      // Test CompareOp.LESS: original = val3, compare with val4, fail
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS,
-          new BinaryComparator(val4), put, true);
-      assertEquals(false, res);
+    // Test CompareOp.LESS: original = val3, compare with val4, fail
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS,
+        new BinaryComparator(val4), put);
+    assertEquals(false, res);
 
-      // Test CompareOp.LESS: original = val3, compare with val2,
-      // succeed (now value = val2)
-      put = new Put(row1);
-      put.addColumn(fam1, qf1, val2);
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS,
-          new BinaryComparator(val2), put, true);
-      assertEquals(true, res);
+    // Test CompareOp.LESS: original = val3, compare with val2,
+    // succeed (now value = val2)
+    put = new Put(row1);
+    put.addColumn(fam1, qf1, val2);
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS,
+        new BinaryComparator(val2), put);
+    assertEquals(true, res);
 
-      // Test CompareOp.LESS_OR_EQUAL: original = val2, compare with val3, fail
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS_OR_EQUAL,
-          new BinaryComparator(val3), put, true);
-      assertEquals(false, res);
+    // Test CompareOp.LESS_OR_EQUAL: original = val2, compare with val3, fail
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS_OR_EQUAL,
+        new BinaryComparator(val3), put);
+    assertEquals(false, res);
 
-      // Test CompareOp.LESS_OR_EQUAL: original = val2, compare with val2,
-      // succeed (value still = val2)
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS_OR_EQUAL,
-          new BinaryComparator(val2), put, true);
-      assertEquals(true, res);
+    // Test CompareOp.LESS_OR_EQUAL: original = val2, compare with val2,
+    // succeed (value still = val2)
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS_OR_EQUAL,
+        new BinaryComparator(val2), put);
+    assertEquals(true, res);
 
-      // Test CompareOp.LESS_OR_EQUAL: original = val2, compare with val1,
-      // succeed (now value = val3)
-      put = new Put(row1);
-      put.addColumn(fam1, qf1, val3);
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS_OR_EQUAL,
-          new BinaryComparator(val1), put, true);
-      assertEquals(true, res);
+    // Test CompareOp.LESS_OR_EQUAL: original = val2, compare with val1,
+    // succeed (now value = val3)
+    put = new Put(row1);
+    put.addColumn(fam1, qf1, val3);
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.LESS_OR_EQUAL,
+        new BinaryComparator(val1), put);
+    assertEquals(true, res);
 
-      // Test CompareOp.GREATER: original = val3, compare with val3, fail
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER,
-          new BinaryComparator(val3), put, true);
-      assertEquals(false, res);
+    // Test CompareOp.GREATER: original = val3, compare with val3, fail
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER,
+        new BinaryComparator(val3), put);
+    assertEquals(false, res);
 
-      // Test CompareOp.GREATER: original = val3, compare with val2, fail
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER,
-          new BinaryComparator(val2), put, true);
-      assertEquals(false, res);
+    // Test CompareOp.GREATER: original = val3, compare with val2, fail
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER,
+        new BinaryComparator(val2), put);
+    assertEquals(false, res);
 
-      // Test CompareOp.GREATER: original = val3, compare with val4,
-      // succeed (now value = val2)
-      put = new Put(row1);
-      put.addColumn(fam1, qf1, val2);
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER,
-          new BinaryComparator(val4), put, true);
-      assertEquals(true, res);
+    // Test CompareOp.GREATER: original = val3, compare with val4,
+    // succeed (now value = val2)
+    put = new Put(row1);
+    put.addColumn(fam1, qf1, val2);
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER,
+        new BinaryComparator(val4), put);
+    assertEquals(true, res);
 
-      // Test CompareOp.GREATER_OR_EQUAL: original = val2, compare with val1, fail
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER_OR_EQUAL,
-          new BinaryComparator(val1), put, true);
-      assertEquals(false, res);
+    // Test CompareOp.GREATER_OR_EQUAL: original = val2, compare with val1, fail
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER_OR_EQUAL,
+        new BinaryComparator(val1), put);
+    assertEquals(false, res);
 
-      // Test CompareOp.GREATER_OR_EQUAL: original = val2, compare with val2,
-      // succeed (value still = val2)
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER_OR_EQUAL,
-          new BinaryComparator(val2), put, true);
-      assertEquals(true, res);
+    // Test CompareOp.GREATER_OR_EQUAL: original = val2, compare with val2,
+    // succeed (value still = val2)
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER_OR_EQUAL,
+        new BinaryComparator(val2), put);
+    assertEquals(true, res);
 
-      // Test CompareOp.GREATER_OR_EQUAL: original = val2, compare with val3, succeed
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER_OR_EQUAL,
-          new BinaryComparator(val3), put, true);
-      assertEquals(true, res);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    // Test CompareOp.GREATER_OR_EQUAL: original = val2, compare with val3, succeed
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.GREATER_OR_EQUAL,
+        new BinaryComparator(val3), put);
+    assertEquals(true, res);
   }
 
   @Test
@@ -2007,55 +1979,45 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
-      // Putting data in the key to check
-      Put put = new Put(row1);
-      put.addColumn(fam1, qf1, val1);
-      region.put(put);
+    // Putting data in the key to check
+    Put put = new Put(row1);
+    put.addColumn(fam1, qf1, val1);
+    region.put(put);
 
-      // Creating put to add
-      long ts = System.currentTimeMillis();
-      KeyValue kv = new KeyValue(row1, fam2, qf1, ts, KeyValue.Type.Put, val2);
-      put = new Put(row1);
-      put.add(kv);
+    // Creating put to add
+    long ts = System.currentTimeMillis();
+    KeyValue kv = new KeyValue(row1, fam2, qf1, ts, KeyValue.Type.Put, val2);
+    put = new Put(row1);
+    put.add(kv);
 
-      // checkAndPut with wrong value
-      boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(
-          val1), put, true);
-      assertEquals(true, res);
+    // checkAndPut with wrong value
+    boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(val1), put);
+    assertEquals(true, res);
 
-      Get get = new Get(row1);
-      get.addColumn(fam2, qf1);
-      Cell[] actual = region.get(get).rawCells();
+    Get get = new Get(row1);
+    get.addColumn(fam2, qf1);
+    Cell[] actual = region.get(get).rawCells();
 
-      Cell[] expected = { kv };
+    Cell[] expected = { kv };
 
-      assertEquals(expected.length, actual.length);
-      for (int i = 0; i < actual.length; i++) {
-        assertEquals(expected[i], actual[i]);
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    assertEquals(expected.length, actual.length);
+    for (int i = 0; i < actual.length; i++) {
+      assertEquals(expected[i], actual[i]);
     }
   }
 
   @Test
   public void testCheckAndPut_wrongRowInPut() throws IOException {
     this.region = initHRegion(tableName, method, CONF, COLUMNS);
+    Put put = new Put(row2);
+    put.addColumn(fam1, qual1, value1);
     try {
-      Put put = new Put(row2);
-      put.addColumn(fam1, qual1, value1);
-      try {
-        region.checkAndMutate(row, fam1, qual1, CompareOperator.EQUAL,
-            new BinaryComparator(value2), put, false);
-        fail();
-      } catch (org.apache.hadoop.hbase.DoNotRetryIOException expected) {
-        // expected exception.
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+      region.checkAndMutate(row, fam1, qual1, CompareOperator.EQUAL,
+          new BinaryComparator(value2), put);
+      fail();
+    } catch (org.apache.hadoop.hbase.DoNotRetryIOException expected) {
+      // expected exception.
     }
   }
 
@@ -2076,63 +2038,58 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
-      // Put content
-      Put put = new Put(row1);
-      put.addColumn(fam1, qf1, val1);
-      region.put(put);
-      Threads.sleep(2);
+    // Put content
+    Put put = new Put(row1);
+    put.addColumn(fam1, qf1, val1);
+    region.put(put);
+    Threads.sleep(2);
 
-      put = new Put(row1);
-      put.addColumn(fam1, qf1, val2);
-      put.addColumn(fam2, qf1, val3);
-      put.addColumn(fam2, qf2, val2);
-      put.addColumn(fam2, qf3, val1);
-      put.addColumn(fam1, qf3, val1);
-      region.put(put);
+    put = new Put(row1);
+    put.addColumn(fam1, qf1, val2);
+    put.addColumn(fam2, qf1, val3);
+    put.addColumn(fam2, qf2, val2);
+    put.addColumn(fam2, qf3, val1);
+    put.addColumn(fam1, qf3, val1);
+    region.put(put);
 
-      // Multi-column delete
-      Delete delete = new Delete(row1);
-      delete.addColumn(fam1, qf1);
-      delete.addColumn(fam2, qf1);
-      delete.addColumn(fam1, qf3);
-      boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(
-          val2), delete, true);
-      assertEquals(true, res);
+    // Multi-column delete
+    Delete delete = new Delete(row1);
+    delete.addColumn(fam1, qf1);
+    delete.addColumn(fam2, qf1);
+    delete.addColumn(fam1, qf3);
+    boolean res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(val2), delete);
+    assertEquals(true, res);
 
-      Get get = new Get(row1);
-      get.addColumn(fam1, qf1);
-      get.addColumn(fam1, qf3);
-      get.addColumn(fam2, qf2);
-      Result r = region.get(get);
-      assertEquals(2, r.size());
-      assertArrayEquals(val1, r.getValue(fam1, qf1));
-      assertArrayEquals(val2, r.getValue(fam2, qf2));
+    Get get = new Get(row1);
+    get.addColumn(fam1, qf1);
+    get.addColumn(fam1, qf3);
+    get.addColumn(fam2, qf2);
+    Result r = region.get(get);
+    assertEquals(2, r.size());
+    assertArrayEquals(val1, r.getValue(fam1, qf1));
+    assertArrayEquals(val2, r.getValue(fam2, qf2));
 
-      // Family delete
-      delete = new Delete(row1);
-      delete.addFamily(fam2);
-      res = region.checkAndMutate(row1, fam2, qf1, CompareOperator.EQUAL, new BinaryComparator(emptyVal),
-          delete, true);
-      assertEquals(true, res);
+    // Family delete
+    delete = new Delete(row1);
+    delete.addFamily(fam2);
+    res = region.checkAndMutate(row1, fam2, qf1, CompareOperator.EQUAL,
+        new BinaryComparator(emptyVal), delete);
+    assertEquals(true, res);
 
-      get = new Get(row1);
-      r = region.get(get);
-      assertEquals(1, r.size());
-      assertArrayEquals(val1, r.getValue(fam1, qf1));
+    get = new Get(row1);
+    r = region.get(get);
+    assertEquals(1, r.size());
+    assertArrayEquals(val1, r.getValue(fam1, qf1));
 
-      // Row delete
-      delete = new Delete(row1);
-      res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(val1),
-          delete, true);
-      assertEquals(true, res);
-      get = new Get(row1);
-      r = region.get(get);
-      assertEquals(0, r.size());
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    // Row delete
+    delete = new Delete(row1);
+    res = region.checkAndMutate(row1, fam1, qf1, CompareOperator.EQUAL, new BinaryComparator(val1),
+        delete);
+    assertEquals(true, res);
+    get = new Get(row1);
+    r = region.get(get);
+    assertEquals(0, r.size());
   }
 
   // ////////////////////////////////////////////////////////////////////////////
@@ -2150,23 +2107,18 @@ public class TestHRegion {
     put.addColumn(fam1, qual, 2, value);
 
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      region.put(put);
+    region.put(put);
 
-      // We do support deleting more than 1 'latest' version
-      Delete delete = new Delete(row1);
-      delete.addColumn(fam1, qual);
-      delete.addColumn(fam1, qual);
-      region.delete(delete);
+    // We do support deleting more than 1 'latest' version
+    Delete delete = new Delete(row1);
+    delete.addColumn(fam1, qual);
+    delete.addColumn(fam1, qual);
+    region.delete(delete);
 
-      Get get = new Get(row1);
-      get.addFamily(fam1);
-      Result r = region.get(get);
-      assertEquals(0, r.size());
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    Get get = new Get(row1);
+    get.addFamily(fam1);
+    Result r = region.get(get);
+    assertEquals(0, r.size());
   }
 
   @Test
@@ -2179,35 +2131,26 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, fam1, fam2, fam3);
+    List<Cell> kvs = new ArrayList<>();
+    kvs.add(new KeyValue(row1, fam4, null, null));
+
+    // testing existing family
+    byte[] family = fam2;
+    NavigableMap<byte[], List<Cell>> deleteMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+    deleteMap.put(family, kvs);
+    region.delete(deleteMap, Durability.SYNC_WAL);
+
+    // testing non existing family
+    boolean ok = false;
+    family = fam4;
     try {
-      List<Cell> kvs = new ArrayList<>();
-      kvs.add(new KeyValue(row1, fam4, null, null));
-
-      // testing existing family
-      byte[] family = fam2;
-      try {
-        NavigableMap<byte[], List<Cell>> deleteMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
-        deleteMap.put(family, kvs);
-        region.delete(deleteMap, Durability.SYNC_WAL);
-      } catch (Exception e) {
-        fail("Family " + new String(family, StandardCharsets.UTF_8) + " does not exist");
-      }
-
-      // testing non existing family
-      boolean ok = false;
-      family = fam4;
-      try {
-        NavigableMap<byte[], List<Cell>> deleteMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
-        deleteMap.put(family, kvs);
-        region.delete(deleteMap, Durability.SYNC_WAL);
-      } catch (Exception e) {
-        ok = true;
-      }
-      assertTrue("Family " + new String(family, StandardCharsets.UTF_8) + " does exist", ok);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+      deleteMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+      deleteMap.put(family, kvs);
+      region.delete(deleteMap, Durability.SYNC_WAL);
+    } catch (Exception e) {
+      ok = true;
     }
+    assertTrue("Family " + new String(family, StandardCharsets.UTF_8) + " does exist", ok);
   }
 
   @Test
@@ -2215,66 +2158,61 @@ public class TestHRegion {
     byte[] fam = Bytes.toBytes("info");
     byte[][] families = { fam };
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
-      EnvironmentEdgeManagerTestHelper.injectEdge(new IncrementingEnvironmentEdge());
+    EnvironmentEdgeManagerTestHelper.injectEdge(new IncrementingEnvironmentEdge());
 
-      byte[] row = Bytes.toBytes("table_name");
-      // column names
-      byte[] serverinfo = Bytes.toBytes("serverinfo");
-      byte[] splitA = Bytes.toBytes("splitA");
-      byte[] splitB = Bytes.toBytes("splitB");
+    byte[] row = Bytes.toBytes("table_name");
+    // column names
+    byte[] serverinfo = Bytes.toBytes("serverinfo");
+    byte[] splitA = Bytes.toBytes("splitA");
+    byte[] splitB = Bytes.toBytes("splitB");
 
-      // add some data:
-      Put put = new Put(row);
-      put.addColumn(fam, splitA, Bytes.toBytes("reference_A"));
-      region.put(put);
+    // add some data:
+    Put put = new Put(row);
+    put.addColumn(fam, splitA, Bytes.toBytes("reference_A"));
+    region.put(put);
 
-      put = new Put(row);
-      put.addColumn(fam, splitB, Bytes.toBytes("reference_B"));
-      region.put(put);
+    put = new Put(row);
+    put.addColumn(fam, splitB, Bytes.toBytes("reference_B"));
+    region.put(put);
 
-      put = new Put(row);
-      put.addColumn(fam, serverinfo, Bytes.toBytes("ip_address"));
-      region.put(put);
+    put = new Put(row);
+    put.addColumn(fam, serverinfo, Bytes.toBytes("ip_address"));
+    region.put(put);
 
-      // ok now delete a split:
-      Delete delete = new Delete(row);
-      delete.addColumns(fam, splitA);
-      region.delete(delete);
+    // ok now delete a split:
+    Delete delete = new Delete(row);
+    delete.addColumns(fam, splitA);
+    region.delete(delete);
 
-      // assert some things:
-      Get get = new Get(row).addColumn(fam, serverinfo);
-      Result result = region.get(get);
-      assertEquals(1, result.size());
+    // assert some things:
+    Get get = new Get(row).addColumn(fam, serverinfo);
+    Result result = region.get(get);
+    assertEquals(1, result.size());
 
-      get = new Get(row).addColumn(fam, splitA);
-      result = region.get(get);
-      assertEquals(0, result.size());
+    get = new Get(row).addColumn(fam, splitA);
+    result = region.get(get);
+    assertEquals(0, result.size());
 
-      get = new Get(row).addColumn(fam, splitB);
-      result = region.get(get);
-      assertEquals(1, result.size());
+    get = new Get(row).addColumn(fam, splitB);
+    result = region.get(get);
+    assertEquals(1, result.size());
 
-      // Assert that after a delete, I can put.
-      put = new Put(row);
-      put.addColumn(fam, splitA, Bytes.toBytes("reference_A"));
-      region.put(put);
-      get = new Get(row);
-      result = region.get(get);
-      assertEquals(3, result.size());
+    // Assert that after a delete, I can put.
+    put = new Put(row);
+    put.addColumn(fam, splitA, Bytes.toBytes("reference_A"));
+    region.put(put);
+    get = new Get(row);
+    result = region.get(get);
+    assertEquals(3, result.size());
 
-      // Now delete all... then test I can add stuff back
-      delete = new Delete(row);
-      region.delete(delete);
-      assertEquals(0, region.get(get).size());
+    // Now delete all... then test I can add stuff back
+    delete = new Delete(row);
+    region.delete(delete);
+    assertEquals(0, region.get(get).size());
 
-      region.put(new Put(row).addColumn(fam, splitA, Bytes.toBytes("reference_A")));
-      result = region.get(get);
-      assertEquals(1, result.size());
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    region.put(new Put(row).addColumn(fam, splitA, Bytes.toBytes("reference_A")));
+    result = region.get(get);
+    assertEquals(1, result.size());
   }
 
   @Test
@@ -2282,37 +2220,32 @@ public class TestHRegion {
     byte[] fam = Bytes.toBytes("info");
     byte[][] families = { fam };
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
-      byte[] row = Bytes.toBytes("table_name");
-      // column names
-      byte[] serverinfo = Bytes.toBytes("serverinfo");
+    byte[] row = Bytes.toBytes("table_name");
+    // column names
+    byte[] serverinfo = Bytes.toBytes("serverinfo");
 
-      // add data in the far future
-      Put put = new Put(row);
-      put.addColumn(fam, serverinfo, HConstants.LATEST_TIMESTAMP - 5, Bytes.toBytes("value"));
-      region.put(put);
+    // add data in the far future
+    Put put = new Put(row);
+    put.addColumn(fam, serverinfo, HConstants.LATEST_TIMESTAMP - 5, Bytes.toBytes("value"));
+    region.put(put);
 
-      // now delete something in the present
-      Delete delete = new Delete(row);
-      region.delete(delete);
+    // now delete something in the present
+    Delete delete = new Delete(row);
+    region.delete(delete);
 
-      // make sure we still see our data
-      Get get = new Get(row).addColumn(fam, serverinfo);
-      Result result = region.get(get);
-      assertEquals(1, result.size());
+    // make sure we still see our data
+    Get get = new Get(row).addColumn(fam, serverinfo);
+    Result result = region.get(get);
+    assertEquals(1, result.size());
 
-      // delete the future row
-      delete = new Delete(row, HConstants.LATEST_TIMESTAMP - 3);
-      region.delete(delete);
+    // delete the future row
+    delete = new Delete(row, HConstants.LATEST_TIMESTAMP - 3);
+    region.delete(delete);
 
-      // make sure it is gone
-      get = new Get(row).addColumn(fam, serverinfo);
-      result = region.get(get);
-      assertEquals(0, result.size());
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    // make sure it is gone
+    get = new Get(row).addColumn(fam, serverinfo);
+    result = region.get(get);
+    assertEquals(0, result.size());
   }
 
   /**
@@ -2324,45 +2257,39 @@ public class TestHRegion {
     byte[] fam = Bytes.toBytes("info");
     byte[][] families = { fam };
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
-      byte[] row = Bytes.toBytes("row1");
-      // column names
-      byte[] qual = Bytes.toBytes("qual");
+    byte[] row = Bytes.toBytes("row1");
+    // column names
+    byte[] qual = Bytes.toBytes("qual");
 
-      // add data with LATEST_TIMESTAMP, put without WAL
-      Put put = new Put(row);
-      put.addColumn(fam, qual, HConstants.LATEST_TIMESTAMP, Bytes.toBytes("value"));
-      region.put(put);
+    // add data with LATEST_TIMESTAMP, put without WAL
+    Put put = new Put(row);
+    put.addColumn(fam, qual, HConstants.LATEST_TIMESTAMP, Bytes.toBytes("value"));
+    region.put(put);
 
-      // Make sure it shows up with an actual timestamp
-      Get get = new Get(row).addColumn(fam, qual);
-      Result result = region.get(get);
-      assertEquals(1, result.size());
-      Cell kv = result.rawCells()[0];
-      LOG.info("Got: " + kv);
-      assertTrue("LATEST_TIMESTAMP was not replaced with real timestamp",
-          kv.getTimestamp() != HConstants.LATEST_TIMESTAMP);
+    // Make sure it shows up with an actual timestamp
+    Get get = new Get(row).addColumn(fam, qual);
+    Result result = region.get(get);
+    assertEquals(1, result.size());
+    Cell kv = result.rawCells()[0];
+    LOG.info("Got: " + kv);
+    assertTrue("LATEST_TIMESTAMP was not replaced with real timestamp",
+        kv.getTimestamp() != HConstants.LATEST_TIMESTAMP);
 
-      // Check same with WAL enabled (historically these took different
-      // code paths, so check both)
-      row = Bytes.toBytes("row2");
-      put = new Put(row);
-      put.addColumn(fam, qual, HConstants.LATEST_TIMESTAMP, Bytes.toBytes("value"));
-      region.put(put);
+    // Check same with WAL enabled (historically these took different
+    // code paths, so check both)
+    row = Bytes.toBytes("row2");
+    put = new Put(row);
+    put.addColumn(fam, qual, HConstants.LATEST_TIMESTAMP, Bytes.toBytes("value"));
+    region.put(put);
 
-      // Make sure it shows up with an actual timestamp
-      get = new Get(row).addColumn(fam, qual);
-      result = region.get(get);
-      assertEquals(1, result.size());
-      kv = result.rawCells()[0];
-      LOG.info("Got: " + kv);
-      assertTrue("LATEST_TIMESTAMP was not replaced with real timestamp",
-          kv.getTimestamp() != HConstants.LATEST_TIMESTAMP);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
-
+    // Make sure it shows up with an actual timestamp
+    get = new Get(row).addColumn(fam, qual);
+    result = region.get(get);
+    assertEquals(1, result.size());
+    kv = result.rawCells()[0];
+    LOG.info("Got: " + kv);
+    assertTrue("LATEST_TIMESTAMP was not replaced with real timestamp",
+        kv.getTimestamp() != HConstants.LATEST_TIMESTAMP);
   }
 
   /**
@@ -2380,22 +2307,17 @@ public class TestHRegion {
     this.region = initHRegion(tableName, method, CONF, families);
     boolean caughtExcep = false;
     try {
-      try {
-        // no TS specified == use latest. should not error
-        region.put(new Put(row).addColumn(fam, Bytes.toBytes("qual"), Bytes.toBytes("value")));
-        // TS out of range. should error
-        region.put(new Put(row).addColumn(fam, Bytes.toBytes("qual"),
-            System.currentTimeMillis() + 2000, Bytes.toBytes("value")));
-        fail("Expected IOE for TS out of configured timerange");
-      } catch (FailedSanityCheckException ioe) {
-        LOG.debug("Received expected exception", ioe);
-        caughtExcep = true;
-      }
-      assertTrue("Should catch FailedSanityCheckException", caughtExcep);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+      // no TS specified == use latest. should not error
+      region.put(new Put(row).addColumn(fam, Bytes.toBytes("qual"), Bytes.toBytes("value")));
+      // TS out of range. should error
+      region.put(new Put(row).addColumn(fam, Bytes.toBytes("qual"),
+          System.currentTimeMillis() + 2000, Bytes.toBytes("value")));
+      fail("Expected IOE for TS out of configured timerange");
+    } catch (FailedSanityCheckException ioe) {
+      LOG.debug("Received expected exception", ioe);
+      caughtExcep = true;
     }
+    assertTrue("Should catch FailedSanityCheckException", caughtExcep);
   }
 
   @Test
@@ -2403,41 +2325,36 @@ public class TestHRegion {
     byte[] fam1 = Bytes.toBytes("columnA");
     byte[] fam2 = Bytes.toBytes("columnB");
     this.region = initHRegion(tableName, method, CONF, fam1, fam2);
-    try {
-      byte[] rowA = Bytes.toBytes("rowA");
-      byte[] rowB = Bytes.toBytes("rowB");
+    byte[] rowA = Bytes.toBytes("rowA");
+    byte[] rowB = Bytes.toBytes("rowB");
 
-      byte[] value = Bytes.toBytes("value");
+    byte[] value = Bytes.toBytes("value");
 
-      Delete delete = new Delete(rowA);
-      delete.addFamily(fam1);
+    Delete delete = new Delete(rowA);
+    delete.addFamily(fam1);
 
-      region.delete(delete);
+    region.delete(delete);
 
-      // now create data.
-      Put put = new Put(rowA);
-      put.addColumn(fam2, null, value);
-      region.put(put);
+    // now create data.
+    Put put = new Put(rowA);
+    put.addColumn(fam2, null, value);
+    region.put(put);
 
-      put = new Put(rowB);
-      put.addColumn(fam1, null, value);
-      put.addColumn(fam2, null, value);
-      region.put(put);
+    put = new Put(rowB);
+    put.addColumn(fam1, null, value);
+    put.addColumn(fam2, null, value);
+    region.put(put);
 
-      Scan scan = new Scan();
-      scan.addFamily(fam1).addFamily(fam2);
-      InternalScanner s = region.getScanner(scan);
-      List<Cell> results = new ArrayList<>();
-      s.next(results);
-      assertTrue(CellUtil.matchingRows(results.get(0), rowA));
+    Scan scan = new Scan();
+    scan.addFamily(fam1).addFamily(fam2);
+    InternalScanner s = region.getScanner(scan);
+    List<Cell> results = new ArrayList<>();
+    s.next(results);
+    assertTrue(CellUtil.matchingRows(results.get(0), rowA));
 
-      results.clear();
-      s.next(results);
-      assertTrue(CellUtil.matchingRows(results.get(0), rowB));
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    results.clear();
+    s.next(results);
+    assertTrue(CellUtil.matchingRows(results.get(0), rowB));
   }
 
   @Test
@@ -2445,19 +2362,19 @@ public class TestHRegion {
     FileSystem fs = FileSystem.get(CONF);
     Path rootDir = new Path(dir + "testDataInMemoryWithoutWAL");
     FSHLog hLog = new FSHLog(fs, rootDir, "testDataInMemoryWithoutWAL", CONF);
+    hLog.init();
     // This chunk creation is done throughout the code base. Do we want to move it into core?
     // It is missing from this test. W/o it we NPE.
-    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
-    HRegion region = initHRegion(tableName, null, null, false, Durability.SYNC_WAL, hLog,
+    region = initHRegion(tableName, null, null, false, Durability.SYNC_WAL, hLog,
         COLUMN_FAMILY_BYTES);
 
     Cell originalCell = CellUtil.createCell(row, COLUMN_FAMILY_BYTES, qual1,
       System.currentTimeMillis(), KeyValue.Type.Put.getCode(), value1);
-    final long originalSize = KeyValueUtil.length(originalCell);
+    final long originalSize = originalCell.getSerializedSize();
 
     Cell addCell = CellUtil.createCell(row, COLUMN_FAMILY_BYTES, qual1,
       System.currentTimeMillis(), KeyValue.Type.Put.getCode(), Bytes.toBytes("xxxxxxxxxx"));
-    final long addSize = KeyValueUtil.length(addCell);
+    final long addSize = addCell.getSerializedSize();
 
     LOG.info("originalSize:" + originalSize
       + ", addSize:" + addSize);
@@ -2529,46 +2446,41 @@ public class TestHRegion {
 
   public void doTestDelete_AndPostInsert(Delete delete) throws IOException, InterruptedException {
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      EnvironmentEdgeManagerTestHelper.injectEdge(new IncrementingEnvironmentEdge());
-      Put put = new Put(row);
-      put.addColumn(fam1, qual1, value1);
-      region.put(put);
+    EnvironmentEdgeManagerTestHelper.injectEdge(new IncrementingEnvironmentEdge());
+    Put put = new Put(row);
+    put.addColumn(fam1, qual1, value1);
+    region.put(put);
 
-      // now delete the value:
-      region.delete(delete);
+    // now delete the value:
+    region.delete(delete);
 
-      // ok put data:
-      put = new Put(row);
-      put.addColumn(fam1, qual1, value2);
-      region.put(put);
+    // ok put data:
+    put = new Put(row);
+    put.addColumn(fam1, qual1, value2);
+    region.put(put);
 
-      // ok get:
-      Get get = new Get(row);
-      get.addColumn(fam1, qual1);
+    // ok get:
+    Get get = new Get(row);
+    get.addColumn(fam1, qual1);
 
-      Result r = region.get(get);
-      assertEquals(1, r.size());
-      assertArrayEquals(value2, r.getValue(fam1, qual1));
+    Result r = region.get(get);
+    assertEquals(1, r.size());
+    assertArrayEquals(value2, r.getValue(fam1, qual1));
 
-      // next:
-      Scan scan = new Scan(row);
-      scan.addColumn(fam1, qual1);
-      InternalScanner s = region.getScanner(scan);
+    // next:
+    Scan scan = new Scan(row);
+    scan.addColumn(fam1, qual1);
+    InternalScanner s = region.getScanner(scan);
 
-      List<Cell> results = new ArrayList<>();
-      assertEquals(false, s.next(results));
-      assertEquals(1, results.size());
-      Cell kv = results.get(0);
+    List<Cell> results = new ArrayList<>();
+    assertEquals(false, s.next(results));
+    assertEquals(1, results.size());
+    Cell kv = results.get(0);
 
-      assertArrayEquals(value2, CellUtil.cloneValue(kv));
-      assertArrayEquals(fam1, CellUtil.cloneFamily(kv));
-      assertArrayEquals(qual1, CellUtil.cloneQualifier(kv));
-      assertArrayEquals(row, CellUtil.cloneRow(kv));
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    assertArrayEquals(value2, CellUtil.cloneValue(kv));
+    assertArrayEquals(fam1, CellUtil.cloneFamily(kv));
+    assertArrayEquals(qual1, CellUtil.cloneQualifier(kv));
+    assertArrayEquals(row, CellUtil.cloneRow(kv));
   }
 
   @Test
@@ -2580,31 +2492,26 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      // Building checkerList
-      List<Cell> kvs = new ArrayList<>();
-      kvs.add(new KeyValue(row1, fam1, col1, null));
-      kvs.add(new KeyValue(row1, fam1, col2, null));
-      kvs.add(new KeyValue(row1, fam1, col3, null));
+    // Building checkerList
+    List<Cell> kvs = new ArrayList<>();
+    kvs.add(new KeyValue(row1, fam1, col1, null));
+    kvs.add(new KeyValue(row1, fam1, col2, null));
+    kvs.add(new KeyValue(row1, fam1, col3, null));
 
-      NavigableMap<byte[], List<Cell>> deleteMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
-      deleteMap.put(fam1, kvs);
-      region.delete(deleteMap, Durability.SYNC_WAL);
+    NavigableMap<byte[], List<Cell>> deleteMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+    deleteMap.put(fam1, kvs);
+    region.delete(deleteMap, Durability.SYNC_WAL);
 
-      // extract the key values out the memstore:
-      // This is kinda hacky, but better than nothing...
-      long now = System.currentTimeMillis();
-      AbstractMemStore memstore = (AbstractMemStore)region.getStore(fam1).memstore;
-      Cell firstCell = memstore.getActive().first();
-      assertTrue(firstCell.getTimestamp() <= now);
-      now = firstCell.getTimestamp();
-      for (Cell cell : memstore.getActive().getCellSet()) {
-        assertTrue(cell.getTimestamp() <= now);
-        now = cell.getTimestamp();
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // extract the key values out the memstore:
+    // This is kinda hacky, but better than nothing...
+    long now = System.currentTimeMillis();
+    AbstractMemStore memstore = (AbstractMemStore)region.getStore(fam1).memstore;
+    Cell firstCell = memstore.getActive().first();
+    assertTrue(firstCell.getTimestamp() <= now);
+    now = firstCell.getTimestamp();
+    for (Cell cell : memstore.getActive().getCellSet()) {
+      assertTrue(cell.getTimestamp() <= now);
+      now = cell.getTimestamp();
     }
   }
 
@@ -2620,21 +2527,15 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      Get get = new Get(row1);
-      get.addColumn(fam2, col1);
+    Get get = new Get(row1);
+    get.addColumn(fam2, col1);
 
-      // Test
-      try {
-        region.get(get);
-      } catch (org.apache.hadoop.hbase.DoNotRetryIOException e) {
-        assertFalse(false);
-        return;
-      }
-      assertFalse(true);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // Test
+    try {
+      region.get(get);
+      fail("Expecting DoNotRetryIOException in get but did not get any");
+    } catch (org.apache.hadoop.hbase.DoNotRetryIOException e) {
+      LOG.info("Got expected DoNotRetryIOException successfully");
     }
   }
 
@@ -2650,43 +2551,38 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      // Add to memstore
-      Put put = new Put(row1);
-      put.addColumn(fam1, col1, null);
-      put.addColumn(fam1, col2, null);
-      put.addColumn(fam1, col3, null);
-      put.addColumn(fam1, col4, null);
-      put.addColumn(fam1, col5, null);
-      region.put(put);
+    // Add to memstore
+    Put put = new Put(row1);
+    put.addColumn(fam1, col1, null);
+    put.addColumn(fam1, col2, null);
+    put.addColumn(fam1, col3, null);
+    put.addColumn(fam1, col4, null);
+    put.addColumn(fam1, col5, null);
+    region.put(put);
 
-      Get get = new Get(row1);
-      get.addColumn(fam1, col2);
-      get.addColumn(fam1, col4);
-      // Expected result
-      KeyValue kv1 = new KeyValue(row1, fam1, col2);
-      KeyValue kv2 = new KeyValue(row1, fam1, col4);
-      KeyValue[] expected = { kv1, kv2 };
+    Get get = new Get(row1);
+    get.addColumn(fam1, col2);
+    get.addColumn(fam1, col4);
+    // Expected result
+    KeyValue kv1 = new KeyValue(row1, fam1, col2);
+    KeyValue kv2 = new KeyValue(row1, fam1, col4);
+    KeyValue[] expected = { kv1, kv2 };
 
-      // Test
-      Result res = region.get(get);
-      assertEquals(expected.length, res.size());
-      for (int i = 0; i < res.size(); i++) {
-        assertTrue(CellUtil.matchingRows(expected[i], res.rawCells()[i]));
-        assertTrue(CellUtil.matchingFamily(expected[i], res.rawCells()[i]));
-        assertTrue(CellUtil.matchingQualifier(expected[i], res.rawCells()[i]));
-      }
-
-      // Test using a filter on a Get
-      Get g = new Get(row1);
-      final int count = 2;
-      g.setFilter(new ColumnCountGetFilter(count));
-      res = region.get(g);
-      assertEquals(count, res.size());
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // Test
+    Result res = region.get(get);
+    assertEquals(expected.length, res.size());
+    for (int i = 0; i < res.size(); i++) {
+      assertTrue(CellUtil.matchingRows(expected[i], res.rawCells()[i]));
+      assertTrue(CellUtil.matchingFamily(expected[i], res.rawCells()[i]));
+      assertTrue(CellUtil.matchingQualifier(expected[i], res.rawCells()[i]));
     }
+
+    // Test using a filter on a Get
+    Get g = new Get(row1);
+    final int count = 2;
+    g.setFilter(new ColumnCountGetFilter(count));
+    res = region.get(g);
+    assertEquals(count, res.size());
   }
 
   @Test
@@ -2695,16 +2591,11 @@ public class TestHRegion {
     byte[] fam = Bytes.toBytes("fam");
 
     this.region = initHRegion(tableName, method, CONF, fam);
-    try {
-      Get get = new Get(row);
-      get.addFamily(fam);
-      Result r = region.get(get);
+    Get get = new Get(row);
+    get.addFamily(fam);
+    Result r = region.get(get);
 
-      assertTrue(r.isEmpty());
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    assertTrue(r.isEmpty());
   }
 
   @Test
@@ -2726,47 +2617,42 @@ public class TestHRegion {
     final WAL wal = HBaseTestingUtility.createWal(TEST_UTIL.getConfiguration(), logDir, info);
     this.region = TEST_UTIL.createLocalHRegion(info, htd, wal);
 
-    try {
-      // Put 4 version to memstore
-      long ts = 0;
-      Put put = new Put(row1, ts);
-      put.addColumn(fam1, col1, value1);
-      region.put(put);
-      put = new Put(row1, ts + 1);
-      put.addColumn(fam1, col1, Bytes.toBytes("filter1"));
-      region.put(put);
-      put = new Put(row1, ts + 2);
-      put.addColumn(fam1, col1, Bytes.toBytes("filter2"));
-      region.put(put);
-      put = new Put(row1, ts + 3);
-      put.addColumn(fam1, col1, value2);
-      region.put(put);
+    // Put 4 version to memstore
+    long ts = 0;
+    Put put = new Put(row1, ts);
+    put.addColumn(fam1, col1, value1);
+    region.put(put);
+    put = new Put(row1, ts + 1);
+    put.addColumn(fam1, col1, Bytes.toBytes("filter1"));
+    region.put(put);
+    put = new Put(row1, ts + 2);
+    put.addColumn(fam1, col1, Bytes.toBytes("filter2"));
+    region.put(put);
+    put = new Put(row1, ts + 3);
+    put.addColumn(fam1, col1, value2);
+    region.put(put);
 
-      Get get = new Get(row1);
-      get.setMaxVersions();
-      Result res = region.get(get);
-      // Get 3 versions, the oldest version has gone from user view
-      assertEquals(maxVersions, res.size());
+    Get get = new Get(row1);
+    get.setMaxVersions();
+    Result res = region.get(get);
+    // Get 3 versions, the oldest version has gone from user view
+    assertEquals(maxVersions, res.size());
 
-      get.setFilter(new ValueFilter(CompareOp.EQUAL, new SubstringComparator("value")));
-      res = region.get(get);
-      // When use value filter, the oldest version should still gone from user view and it
-      // should only return one key vaule
-      assertEquals(1, res.size());
-      assertTrue(CellUtil.matchingValue(new KeyValue(row1, fam1, col1, value2), res.rawCells()[0]));
-      assertEquals(ts + 3, res.rawCells()[0].getTimestamp());
+    get.setFilter(new ValueFilter(CompareOp.EQUAL, new SubstringComparator("value")));
+    res = region.get(get);
+    // When use value filter, the oldest version should still gone from user view and it
+    // should only return one key vaule
+    assertEquals(1, res.size());
+    assertTrue(CellUtil.matchingValue(new KeyValue(row1, fam1, col1, value2), res.rawCells()[0]));
+    assertEquals(ts + 3, res.rawCells()[0].getTimestamp());
 
-      region.flush(true);
-      region.compact(true);
-      Thread.sleep(1000);
-      res = region.get(get);
-      // After flush and compact, the result should be consistent with previous result
-      assertEquals(1, res.size());
-      assertTrue(CellUtil.matchingValue(new KeyValue(row1, fam1, col1, value2), res.rawCells()[0]));
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    region.flush(true);
+    region.compact(true);
+    Thread.sleep(1000);
+    res = region.get(get);
+    // After flush and compact, the result should be consistent with previous result
+    assertEquals(1, res.size());
+    assertTrue(CellUtil.matchingValue(new KeyValue(row1, fam1, col1, value2), res.rawCells()[0]));
   }
 
   // ////////////////////////////////////////////////////////////////////////////
@@ -2781,18 +2667,13 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, families);
+    Scan scan = new Scan();
+    scan.addFamily(fam1);
+    scan.addFamily(fam2);
     try {
-      Scan scan = new Scan();
-      scan.addFamily(fam1);
-      scan.addFamily(fam2);
-      try {
-        region.getScanner(scan);
-      } catch (Exception e) {
-        assertTrue("Families could not be found in Region", false);
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+      region.getScanner(scan);
+    } catch (Exception e) {
+      assertTrue("Families could not be found in Region", false);
     }
   }
 
@@ -2805,20 +2686,15 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, families);
+    Scan scan = new Scan();
+    scan.addFamily(fam2);
+    boolean ok = false;
     try {
-      Scan scan = new Scan();
-      scan.addFamily(fam2);
-      boolean ok = false;
-      try {
-        region.getScanner(scan);
-      } catch (Exception e) {
-        ok = true;
-      }
-      assertTrue("Families could not be found in Region", ok);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+      region.getScanner(scan);
+    } catch (Exception e) {
+      ok = true;
     }
+    assertTrue("Families could not be found in Region", ok);
   }
 
   @Test
@@ -2833,35 +2709,29 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
+    // Putting data in Region
+    Put put = new Put(row1);
+    put.addColumn(fam1, null, null);
+    put.addColumn(fam2, null, null);
+    put.addColumn(fam3, null, null);
+    put.addColumn(fam4, null, null);
+    region.put(put);
 
-      // Putting data in Region
-      Put put = new Put(row1);
-      put.addColumn(fam1, null, null);
-      put.addColumn(fam2, null, null);
-      put.addColumn(fam3, null, null);
-      put.addColumn(fam4, null, null);
-      region.put(put);
+    Scan scan = null;
+    HRegion.RegionScannerImpl is = null;
 
-      Scan scan = null;
-      HRegion.RegionScannerImpl is = null;
+    // Testing to see how many scanners that is produced by getScanner,
+    // starting
+    // with known number, 2 - current = 1
+    scan = new Scan();
+    scan.addFamily(fam2);
+    scan.addFamily(fam4);
+    is = region.getScanner(scan);
+    assertEquals(1, is.storeHeap.getHeap().size());
 
-      // Testing to see how many scanners that is produced by getScanner,
-      // starting
-      // with known number, 2 - current = 1
-      scan = new Scan();
-      scan.addFamily(fam2);
-      scan.addFamily(fam4);
-      is = region.getScanner(scan);
-      assertEquals(1, is.storeHeap.getHeap().size());
-
-      scan = new Scan();
-      is = region.getScanner(scan);
-      assertEquals(families.length - 1, is.storeHeap.getHeap().size());
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    scan = new Scan();
+    is = region.getScanner(scan);
+    assertEquals(families.length - 1, is.storeHeap.getHeap().size());
   }
 
   /**
@@ -2883,21 +2753,16 @@ public class TestHRegion {
       e.printStackTrace();
       fail("Got IOException during initHRegion, " + e.getMessage());
     }
+    region.closed.set(true);
     try {
-      region.closed.set(true);
-      try {
-        region.getScanner(null);
-        fail("Expected to get an exception during getScanner on a region that is closed");
-      } catch (NotServingRegionException e) {
-        // this is the correct exception that is expected
-      } catch (IOException e) {
-        fail("Got wrong type of exception - should be a NotServingRegionException, " +
-            "but was an IOException: "
-            + e.getMessage());
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+      region.getScanner(null);
+      fail("Expected to get an exception during getScanner on a region that is closed");
+    } catch (NotServingRegionException e) {
+      // this is the correct exception that is expected
+    } catch (IOException e) {
+      fail("Got wrong type of exception - should be a NotServingRegionException, " +
+          "but was an IOException: "
+          + e.getMessage());
     }
   }
 
@@ -2915,54 +2780,49 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
-      // Putting data in Region
-      Put put = null;
-      put = new Put(row1);
-      put.addColumn(fam1, (byte[]) null, ts, null);
-      put.addColumn(fam2, (byte[]) null, ts, null);
-      put.addColumn(fam3, (byte[]) null, ts, null);
-      put.addColumn(fam4, (byte[]) null, ts, null);
-      region.put(put);
+    // Putting data in Region
+    Put put = null;
+    put = new Put(row1);
+    put.addColumn(fam1, (byte[]) null, ts, null);
+    put.addColumn(fam2, (byte[]) null, ts, null);
+    put.addColumn(fam3, (byte[]) null, ts, null);
+    put.addColumn(fam4, (byte[]) null, ts, null);
+    region.put(put);
 
-      put = new Put(row2);
-      put.addColumn(fam1, (byte[]) null, ts, null);
-      put.addColumn(fam2, (byte[]) null, ts, null);
-      put.addColumn(fam3, (byte[]) null, ts, null);
-      put.addColumn(fam4, (byte[]) null, ts, null);
-      region.put(put);
+    put = new Put(row2);
+    put.addColumn(fam1, (byte[]) null, ts, null);
+    put.addColumn(fam2, (byte[]) null, ts, null);
+    put.addColumn(fam3, (byte[]) null, ts, null);
+    put.addColumn(fam4, (byte[]) null, ts, null);
+    region.put(put);
 
-      Scan scan = new Scan();
-      scan.addFamily(fam2);
-      scan.addFamily(fam4);
-      InternalScanner is = region.getScanner(scan);
+    Scan scan = new Scan();
+    scan.addFamily(fam2);
+    scan.addFamily(fam4);
+    InternalScanner is = region.getScanner(scan);
 
-      List<Cell> res = null;
+    List<Cell> res = null;
 
-      // Result 1
-      List<Cell> expected1 = new ArrayList<>();
-      expected1.add(new KeyValue(row1, fam2, null, ts, KeyValue.Type.Put, null));
-      expected1.add(new KeyValue(row1, fam4, null, ts, KeyValue.Type.Put, null));
+    // Result 1
+    List<Cell> expected1 = new ArrayList<>();
+    expected1.add(new KeyValue(row1, fam2, null, ts, KeyValue.Type.Put, null));
+    expected1.add(new KeyValue(row1, fam4, null, ts, KeyValue.Type.Put, null));
 
-      res = new ArrayList<>();
-      is.next(res);
-      for (int i = 0; i < res.size(); i++) {
-        assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected1.get(i), res.get(i)));
-      }
+    res = new ArrayList<>();
+    is.next(res);
+    for (int i = 0; i < res.size(); i++) {
+      assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected1.get(i), res.get(i)));
+    }
 
-      // Result 2
-      List<Cell> expected2 = new ArrayList<>();
-      expected2.add(new KeyValue(row2, fam2, null, ts, KeyValue.Type.Put, null));
-      expected2.add(new KeyValue(row2, fam4, null, ts, KeyValue.Type.Put, null));
+    // Result 2
+    List<Cell> expected2 = new ArrayList<>();
+    expected2.add(new KeyValue(row2, fam2, null, ts, KeyValue.Type.Put, null));
+    expected2.add(new KeyValue(row2, fam4, null, ts, KeyValue.Type.Put, null));
 
-      res = new ArrayList<>();
-      is.next(res);
-      for (int i = 0; i < res.size(); i++) {
-        assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected2.get(i), res.get(i)));
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    res = new ArrayList<>();
+    is.next(res);
+    for (int i = 0; i < res.size(); i++) {
+      assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected2.get(i), res.get(i)));
     }
   }
 
@@ -2980,47 +2840,42 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
-      // Putting data in Region
-      Put put = null;
-      KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
-      KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
-      KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
+    // Putting data in Region
+    Put put = null;
+    KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
+    KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
+    KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
 
-      KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
-      KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
-      KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
+    KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
+    KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
+    KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
 
-      put = new Put(row1);
-      put.add(kv13);
-      put.add(kv12);
-      put.add(kv11);
-      put.add(kv23);
-      put.add(kv22);
-      put.add(kv21);
-      region.put(put);
+    put = new Put(row1);
+    put.add(kv13);
+    put.add(kv12);
+    put.add(kv11);
+    put.add(kv23);
+    put.add(kv22);
+    put.add(kv21);
+    region.put(put);
 
-      // Expected
-      List<Cell> expected = new ArrayList<>();
-      expected.add(kv13);
-      expected.add(kv12);
+    // Expected
+    List<Cell> expected = new ArrayList<>();
+    expected.add(kv13);
+    expected.add(kv12);
 
-      Scan scan = new Scan(row1);
-      scan.addColumn(fam1, qf1);
-      scan.setMaxVersions(MAX_VERSIONS);
-      List<Cell> actual = new ArrayList<>();
-      InternalScanner scanner = region.getScanner(scan);
+    Scan scan = new Scan(row1);
+    scan.addColumn(fam1, qf1);
+    scan.setMaxVersions(MAX_VERSIONS);
+    List<Cell> actual = new ArrayList<>();
+    InternalScanner scanner = region.getScanner(scan);
 
-      boolean hasNext = scanner.next(actual);
-      assertEquals(false, hasNext);
+    boolean hasNext = scanner.next(actual);
+    assertEquals(false, hasNext);
 
-      // Verify result
-      for (int i = 0; i < expected.size(); i++) {
-        assertEquals(expected.get(i), actual.get(i));
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // Verify result
+    for (int i = 0; i < expected.size(); i++) {
+      assertEquals(expected.get(i), actual.get(i));
     }
   }
 
@@ -3038,51 +2893,46 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
-      // Putting data in Region
-      Put put = null;
-      KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
-      KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
-      KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
+    // Putting data in Region
+    Put put = null;
+    KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
+    KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
+    KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
 
-      KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
-      KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
-      KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
+    KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
+    KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
+    KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
 
-      put = new Put(row1);
-      put.add(kv13);
-      put.add(kv12);
-      put.add(kv11);
-      put.add(kv23);
-      put.add(kv22);
-      put.add(kv21);
-      region.put(put);
-      region.flush(true);
+    put = new Put(row1);
+    put.add(kv13);
+    put.add(kv12);
+    put.add(kv11);
+    put.add(kv23);
+    put.add(kv22);
+    put.add(kv21);
+    region.put(put);
+    region.flush(true);
 
-      // Expected
-      List<Cell> expected = new ArrayList<>();
-      expected.add(kv13);
-      expected.add(kv12);
-      expected.add(kv23);
-      expected.add(kv22);
+    // Expected
+    List<Cell> expected = new ArrayList<>();
+    expected.add(kv13);
+    expected.add(kv12);
+    expected.add(kv23);
+    expected.add(kv22);
 
-      Scan scan = new Scan(row1);
-      scan.addColumn(fam1, qf1);
-      scan.addColumn(fam1, qf2);
-      scan.setMaxVersions(MAX_VERSIONS);
-      List<Cell> actual = new ArrayList<>();
-      InternalScanner scanner = region.getScanner(scan);
+    Scan scan = new Scan(row1);
+    scan.addColumn(fam1, qf1);
+    scan.addColumn(fam1, qf2);
+    scan.setMaxVersions(MAX_VERSIONS);
+    List<Cell> actual = new ArrayList<>();
+    InternalScanner scanner = region.getScanner(scan);
 
-      boolean hasNext = scanner.next(actual);
-      assertEquals(false, hasNext);
+    boolean hasNext = scanner.next(actual);
+    assertEquals(false, hasNext);
 
-      // Verify result
-      for (int i = 0; i < expected.size(); i++) {
-        assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected.get(i), actual.get(i)));
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // Verify result
+    for (int i = 0; i < expected.size(); i++) {
+      assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected.get(i), actual.get(i)));
     }
   }
 
@@ -3102,69 +2952,64 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
-      // Putting data in Region
-      KeyValue kv14 = new KeyValue(row1, fam1, qf1, ts4, KeyValue.Type.Put, null);
-      KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
-      KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
-      KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
+    // Putting data in Region
+    KeyValue kv14 = new KeyValue(row1, fam1, qf1, ts4, KeyValue.Type.Put, null);
+    KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
+    KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
+    KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
 
-      KeyValue kv24 = new KeyValue(row1, fam1, qf2, ts4, KeyValue.Type.Put, null);
-      KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
-      KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
-      KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
+    KeyValue kv24 = new KeyValue(row1, fam1, qf2, ts4, KeyValue.Type.Put, null);
+    KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
+    KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
+    KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
 
-      Put put = null;
-      put = new Put(row1);
-      put.add(kv14);
-      put.add(kv24);
-      region.put(put);
-      region.flush(true);
+    Put put = null;
+    put = new Put(row1);
+    put.add(kv14);
+    put.add(kv24);
+    region.put(put);
+    region.flush(true);
 
-      put = new Put(row1);
-      put.add(kv23);
-      put.add(kv13);
-      region.put(put);
-      region.flush(true);
+    put = new Put(row1);
+    put.add(kv23);
+    put.add(kv13);
+    region.put(put);
+    region.flush(true);
 
-      put = new Put(row1);
-      put.add(kv22);
-      put.add(kv12);
-      region.put(put);
-      region.flush(true);
+    put = new Put(row1);
+    put.add(kv22);
+    put.add(kv12);
+    region.put(put);
+    region.flush(true);
 
-      put = new Put(row1);
-      put.add(kv21);
-      put.add(kv11);
-      region.put(put);
+    put = new Put(row1);
+    put.add(kv21);
+    put.add(kv11);
+    region.put(put);
 
-      // Expected
-      List<Cell> expected = new ArrayList<>();
-      expected.add(kv14);
-      expected.add(kv13);
-      expected.add(kv12);
-      expected.add(kv24);
-      expected.add(kv23);
-      expected.add(kv22);
+    // Expected
+    List<Cell> expected = new ArrayList<>();
+    expected.add(kv14);
+    expected.add(kv13);
+    expected.add(kv12);
+    expected.add(kv24);
+    expected.add(kv23);
+    expected.add(kv22);
 
-      Scan scan = new Scan(row1);
-      scan.addColumn(fam1, qf1);
-      scan.addColumn(fam1, qf2);
-      int versions = 3;
-      scan.setMaxVersions(versions);
-      List<Cell> actual = new ArrayList<>();
-      InternalScanner scanner = region.getScanner(scan);
+    Scan scan = new Scan(row1);
+    scan.addColumn(fam1, qf1);
+    scan.addColumn(fam1, qf2);
+    int versions = 3;
+    scan.setMaxVersions(versions);
+    List<Cell> actual = new ArrayList<>();
+    InternalScanner scanner = region.getScanner(scan);
 
-      boolean hasNext = scanner.next(actual);
-      assertEquals(false, hasNext);
+    boolean hasNext = scanner.next(actual);
+    assertEquals(false, hasNext);
 
-      // Verify result
-      for (int i = 0; i < expected.size(); i++) {
-        assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected.get(i), actual.get(i)));
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // Verify result
+    for (int i = 0; i < expected.size(); i++) {
+      assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected.get(i), actual.get(i)));
     }
   }
 
@@ -3182,49 +3027,44 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, families);
-    try {
-      // Putting data in Region
-      Put put = null;
-      KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
-      KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
-      KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
+    // Putting data in Region
+    Put put = null;
+    KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
+    KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
+    KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
 
-      KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
-      KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
-      KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
+    KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
+    KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
+    KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
 
-      put = new Put(row1);
-      put.add(kv13);
-      put.add(kv12);
-      put.add(kv11);
-      put.add(kv23);
-      put.add(kv22);
-      put.add(kv21);
-      region.put(put);
+    put = new Put(row1);
+    put.add(kv13);
+    put.add(kv12);
+    put.add(kv11);
+    put.add(kv23);
+    put.add(kv22);
+    put.add(kv21);
+    region.put(put);
 
-      // Expected
-      List<Cell> expected = new ArrayList<>();
-      expected.add(kv13);
-      expected.add(kv12);
-      expected.add(kv23);
-      expected.add(kv22);
+    // Expected
+    List<Cell> expected = new ArrayList<>();
+    expected.add(kv13);
+    expected.add(kv12);
+    expected.add(kv23);
+    expected.add(kv22);
 
-      Scan scan = new Scan(row1);
-      scan.addFamily(fam1);
-      scan.setMaxVersions(MAX_VERSIONS);
-      List<Cell> actual = new ArrayList<>();
-      InternalScanner scanner = region.getScanner(scan);
+    Scan scan = new Scan(row1);
+    scan.addFamily(fam1);
+    scan.setMaxVersions(MAX_VERSIONS);
+    List<Cell> actual = new ArrayList<>();
+    InternalScanner scanner = region.getScanner(scan);
 
-      boolean hasNext = scanner.next(actual);
-      assertEquals(false, hasNext);
+    boolean hasNext = scanner.next(actual);
+    assertEquals(false, hasNext);
 
-      // Verify result
-      for (int i = 0; i < expected.size(); i++) {
-        assertEquals(expected.get(i), actual.get(i));
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // Verify result
+    for (int i = 0; i < expected.size(); i++) {
+      assertEquals(expected.get(i), actual.get(i));
     }
   }
 
@@ -3241,50 +3081,45 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      // Putting data in Region
-      Put put = null;
-      KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
-      KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
-      KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
+    // Putting data in Region
+    Put put = null;
+    KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
+    KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
+    KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
 
-      KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
-      KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
-      KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
+    KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
+    KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
+    KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
 
-      put = new Put(row1);
-      put.add(kv13);
-      put.add(kv12);
-      put.add(kv11);
-      put.add(kv23);
-      put.add(kv22);
-      put.add(kv21);
-      region.put(put);
-      region.flush(true);
+    put = new Put(row1);
+    put.add(kv13);
+    put.add(kv12);
+    put.add(kv11);
+    put.add(kv23);
+    put.add(kv22);
+    put.add(kv21);
+    region.put(put);
+    region.flush(true);
 
-      // Expected
-      List<Cell> expected = new ArrayList<>();
-      expected.add(kv13);
-      expected.add(kv12);
-      expected.add(kv23);
-      expected.add(kv22);
+    // Expected
+    List<Cell> expected = new ArrayList<>();
+    expected.add(kv13);
+    expected.add(kv12);
+    expected.add(kv23);
+    expected.add(kv22);
 
-      Scan scan = new Scan(row1);
-      scan.addFamily(fam1);
-      scan.setMaxVersions(MAX_VERSIONS);
-      List<Cell> actual = new ArrayList<>();
-      InternalScanner scanner = region.getScanner(scan);
+    Scan scan = new Scan(row1);
+    scan.addFamily(fam1);
+    scan.setMaxVersions(MAX_VERSIONS);
+    List<Cell> actual = new ArrayList<>();
+    InternalScanner scanner = region.getScanner(scan);
 
-      boolean hasNext = scanner.next(actual);
-      assertEquals(false, hasNext);
+    boolean hasNext = scanner.next(actual);
+    assertEquals(false, hasNext);
 
-      // Verify result
-      for (int i = 0; i < expected.size(); i++) {
-        assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected.get(i), actual.get(i)));
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // Verify result
+    for (int i = 0; i < expected.size(); i++) {
+      assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected.get(i), actual.get(i)));
     }
   }
 
@@ -3292,48 +3127,43 @@ public class TestHRegion {
   public void testScanner_StopRow1542() throws IOException {
     byte[] family = Bytes.toBytes("testFamily");
     this.region = initHRegion(tableName, method, CONF, family);
-    try {
-      byte[] row1 = Bytes.toBytes("row111");
-      byte[] row2 = Bytes.toBytes("row222");
-      byte[] row3 = Bytes.toBytes("row333");
-      byte[] row4 = Bytes.toBytes("row444");
-      byte[] row5 = Bytes.toBytes("row555");
+    byte[] row1 = Bytes.toBytes("row111");
+    byte[] row2 = Bytes.toBytes("row222");
+    byte[] row3 = Bytes.toBytes("row333");
+    byte[] row4 = Bytes.toBytes("row444");
+    byte[] row5 = Bytes.toBytes("row555");
 
-      byte[] col1 = Bytes.toBytes("Pub111");
-      byte[] col2 = Bytes.toBytes("Pub222");
+    byte[] col1 = Bytes.toBytes("Pub111");
+    byte[] col2 = Bytes.toBytes("Pub222");
 
-      Put put = new Put(row1);
-      put.addColumn(family, col1, Bytes.toBytes(10L));
-      region.put(put);
+    Put put = new Put(row1);
+    put.addColumn(family, col1, Bytes.toBytes(10L));
+    region.put(put);
 
-      put = new Put(row2);
-      put.addColumn(family, col1, Bytes.toBytes(15L));
-      region.put(put);
+    put = new Put(row2);
+    put.addColumn(family, col1, Bytes.toBytes(15L));
+    region.put(put);
 
-      put = new Put(row3);
-      put.addColumn(family, col2, Bytes.toBytes(20L));
-      region.put(put);
+    put = new Put(row3);
+    put.addColumn(family, col2, Bytes.toBytes(20L));
+    region.put(put);
 
-      put = new Put(row4);
-      put.addColumn(family, col2, Bytes.toBytes(30L));
-      region.put(put);
+    put = new Put(row4);
+    put.addColumn(family, col2, Bytes.toBytes(30L));
+    region.put(put);
 
-      put = new Put(row5);
-      put.addColumn(family, col1, Bytes.toBytes(40L));
-      region.put(put);
+    put = new Put(row5);
+    put.addColumn(family, col1, Bytes.toBytes(40L));
+    region.put(put);
 
-      Scan scan = new Scan(row3, row4);
-      scan.setMaxVersions();
-      scan.addColumn(family, col1);
-      InternalScanner s = region.getScanner(scan);
+    Scan scan = new Scan(row3, row4);
+    scan.setMaxVersions();
+    scan.addColumn(family, col1);
+    InternalScanner s = region.getScanner(scan);
 
-      List<Cell> results = new ArrayList<>();
-      assertEquals(false, s.next(results));
-      assertEquals(0, results.size());
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    List<Cell> results = new ArrayList<>();
+    assertEquals(false, s.next(results));
+    assertEquals(0, results.size());
   }
 
   @Test
@@ -3350,67 +3180,62 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      // Putting data in Region
-      KeyValue kv14 = new KeyValue(row1, fam1, qf1, ts4, KeyValue.Type.Put, null);
-      KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
-      KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
-      KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
+    // Putting data in Region
+    KeyValue kv14 = new KeyValue(row1, fam1, qf1, ts4, KeyValue.Type.Put, null);
+    KeyValue kv13 = new KeyValue(row1, fam1, qf1, ts3, KeyValue.Type.Put, null);
+    KeyValue kv12 = new KeyValue(row1, fam1, qf1, ts2, KeyValue.Type.Put, null);
+    KeyValue kv11 = new KeyValue(row1, fam1, qf1, ts1, KeyValue.Type.Put, null);
 
-      KeyValue kv24 = new KeyValue(row1, fam1, qf2, ts4, KeyValue.Type.Put, null);
-      KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
-      KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
-      KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
+    KeyValue kv24 = new KeyValue(row1, fam1, qf2, ts4, KeyValue.Type.Put, null);
+    KeyValue kv23 = new KeyValue(row1, fam1, qf2, ts3, KeyValue.Type.Put, null);
+    KeyValue kv22 = new KeyValue(row1, fam1, qf2, ts2, KeyValue.Type.Put, null);
+    KeyValue kv21 = new KeyValue(row1, fam1, qf2, ts1, KeyValue.Type.Put, null);
 
-      Put put = null;
-      put = new Put(row1);
-      put.add(kv14);
-      put.add(kv24);
-      region.put(put);
-      region.flush(true);
+    Put put = null;
+    put = new Put(row1);
+    put.add(kv14);
+    put.add(kv24);
+    region.put(put);
+    region.flush(true);
 
-      put = new Put(row1);
-      put.add(kv23);
-      put.add(kv13);
-      region.put(put);
-      region.flush(true);
+    put = new Put(row1);
+    put.add(kv23);
+    put.add(kv13);
+    region.put(put);
+    region.flush(true);
 
-      put = new Put(row1);
-      put.add(kv22);
-      put.add(kv12);
-      region.put(put);
-      region.flush(true);
+    put = new Put(row1);
+    put.add(kv22);
+    put.add(kv12);
+    region.put(put);
+    region.flush(true);
 
-      put = new Put(row1);
-      put.add(kv21);
-      put.add(kv11);
-      region.put(put);
+    put = new Put(row1);
+    put.add(kv21);
+    put.add(kv11);
+    region.put(put);
 
-      // Expected
-      List<KeyValue> expected = new ArrayList<>();
-      expected.add(kv14);
-      expected.add(kv13);
-      expected.add(kv12);
-      expected.add(kv24);
-      expected.add(kv23);
-      expected.add(kv22);
+    // Expected
+    List<KeyValue> expected = new ArrayList<>();
+    expected.add(kv14);
+    expected.add(kv13);
+    expected.add(kv12);
+    expected.add(kv24);
+    expected.add(kv23);
+    expected.add(kv22);
 
-      Scan scan = new Scan(row1);
-      int versions = 3;
-      scan.setMaxVersions(versions);
-      List<Cell> actual = new ArrayList<>();
-      InternalScanner scanner = region.getScanner(scan);
+    Scan scan = new Scan(row1);
+    int versions = 3;
+    scan.setMaxVersions(versions);
+    List<Cell> actual = new ArrayList<>();
+    InternalScanner scanner = region.getScanner(scan);
 
-      boolean hasNext = scanner.next(actual);
-      assertEquals(false, hasNext);
+    boolean hasNext = scanner.next(actual);
+    assertEquals(false, hasNext);
 
-      // Verify result
-      for (int i = 0; i < expected.size(); i++) {
-        assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected.get(i), actual.get(i)));
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // Verify result
+    for (int i = 0; i < expected.size(); i++) {
+      assertTrue(PrivateCellUtil.equalsIgnoreMvccVersion(expected.get(i), actual.get(i)));
     }
   }
 
@@ -3426,61 +3251,56 @@ public class TestHRegion {
     byte[] cf_joined = Bytes.toBytes("joined");
     byte[] cf_alpha = Bytes.toBytes("alpha");
     this.region = initHRegion(tableName, method, CONF, cf_essential, cf_joined, cf_alpha);
-    try {
-      byte[] row1 = Bytes.toBytes("row1");
-      byte[] row2 = Bytes.toBytes("row2");
-      byte[] row3 = Bytes.toBytes("row3");
+    byte[] row1 = Bytes.toBytes("row1");
+    byte[] row2 = Bytes.toBytes("row2");
+    byte[] row3 = Bytes.toBytes("row3");
 
-      byte[] col_normal = Bytes.toBytes("d");
-      byte[] col_alpha = Bytes.toBytes("a");
+    byte[] col_normal = Bytes.toBytes("d");
+    byte[] col_alpha = Bytes.toBytes("a");
 
-      byte[] filtered_val = Bytes.toBytes(3);
+    byte[] filtered_val = Bytes.toBytes(3);
 
-      Put put = new Put(row1);
-      put.addColumn(cf_essential, col_normal, Bytes.toBytes(1));
-      put.addColumn(cf_joined, col_alpha, Bytes.toBytes(1));
-      region.put(put);
+    Put put = new Put(row1);
+    put.addColumn(cf_essential, col_normal, Bytes.toBytes(1));
+    put.addColumn(cf_joined, col_alpha, Bytes.toBytes(1));
+    region.put(put);
 
-      put = new Put(row2);
-      put.addColumn(cf_essential, col_alpha, Bytes.toBytes(2));
-      put.addColumn(cf_joined, col_normal, Bytes.toBytes(2));
-      put.addColumn(cf_alpha, col_alpha, Bytes.toBytes(2));
-      region.put(put);
+    put = new Put(row2);
+    put.addColumn(cf_essential, col_alpha, Bytes.toBytes(2));
+    put.addColumn(cf_joined, col_normal, Bytes.toBytes(2));
+    put.addColumn(cf_alpha, col_alpha, Bytes.toBytes(2));
+    region.put(put);
 
-      put = new Put(row3);
-      put.addColumn(cf_essential, col_normal, filtered_val);
-      put.addColumn(cf_joined, col_normal, filtered_val);
-      region.put(put);
+    put = new Put(row3);
+    put.addColumn(cf_essential, col_normal, filtered_val);
+    put.addColumn(cf_joined, col_normal, filtered_val);
+    region.put(put);
 
-      // Check two things:
-      // 1. result list contains expected values
-      // 2. result list is sorted properly
+    // Check two things:
+    // 1. result list contains expected values
+    // 2. result list is sorted properly
 
-      Scan scan = new Scan();
-      Filter filter = new SingleColumnValueExcludeFilter(cf_essential, col_normal,
-          CompareOp.NOT_EQUAL, filtered_val);
-      scan.setFilter(filter);
-      scan.setLoadColumnFamiliesOnDemand(true);
-      InternalScanner s = region.getScanner(scan);
+    Scan scan = new Scan();
+    Filter filter = new SingleColumnValueExcludeFilter(cf_essential, col_normal,
+        CompareOp.NOT_EQUAL, filtered_val);
+    scan.setFilter(filter);
+    scan.setLoadColumnFamiliesOnDemand(true);
+    InternalScanner s = region.getScanner(scan);
 
-      List<Cell> results = new ArrayList<>();
-      assertTrue(s.next(results));
-      assertEquals(1, results.size());
-      results.clear();
+    List<Cell> results = new ArrayList<>();
+    assertTrue(s.next(results));
+    assertEquals(1, results.size());
+    results.clear();
 
-      assertTrue(s.next(results));
-      assertEquals(3, results.size());
-      assertTrue("orderCheck", CellUtil.matchingFamily(results.get(0), cf_alpha));
-      assertTrue("orderCheck", CellUtil.matchingFamily(results.get(1), cf_essential));
-      assertTrue("orderCheck", CellUtil.matchingFamily(results.get(2), cf_joined));
-      results.clear();
+    assertTrue(s.next(results));
+    assertEquals(3, results.size());
+    assertTrue("orderCheck", CellUtil.matchingFamily(results.get(0), cf_alpha));
+    assertTrue("orderCheck", CellUtil.matchingFamily(results.get(1), cf_essential));
+    assertTrue("orderCheck", CellUtil.matchingFamily(results.get(2), cf_joined));
+    results.clear();
 
-      assertFalse(s.next(results));
-      assertEquals(0, results.size());
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    assertFalse(s.next(results));
+    assertEquals(0, results.size());
   }
 
   /**
@@ -3494,91 +3314,86 @@ public class TestHRegion {
     final byte[] cf_second = Bytes.toBytes("second");
 
     this.region = initHRegion(tableName, method, CONF, cf_first, cf_second);
-    try {
-      final byte[] col_a = Bytes.toBytes("a");
-      final byte[] col_b = Bytes.toBytes("b");
+    final byte[] col_a = Bytes.toBytes("a");
+    final byte[] col_b = Bytes.toBytes("b");
 
-      Put put;
+    Put put;
 
-      for (int i = 0; i < 10; i++) {
-        put = new Put(Bytes.toBytes("r" + Integer.toString(i)));
-        put.addColumn(cf_first, col_a, Bytes.toBytes(i));
-        if (i < 5) {
-          put.addColumn(cf_first, col_b, Bytes.toBytes(i));
-          put.addColumn(cf_second, col_a, Bytes.toBytes(i));
-          put.addColumn(cf_second, col_b, Bytes.toBytes(i));
-        }
-        region.put(put);
+    for (int i = 0; i < 10; i++) {
+      put = new Put(Bytes.toBytes("r" + Integer.toString(i)));
+      put.addColumn(cf_first, col_a, Bytes.toBytes(i));
+      if (i < 5) {
+        put.addColumn(cf_first, col_b, Bytes.toBytes(i));
+        put.addColumn(cf_second, col_a, Bytes.toBytes(i));
+        put.addColumn(cf_second, col_b, Bytes.toBytes(i));
       }
+      region.put(put);
+    }
 
-      Scan scan = new Scan();
-      scan.setLoadColumnFamiliesOnDemand(true);
-      Filter bogusFilter = new FilterBase() {
-        @Override
-        public ReturnCode filterCell(final Cell ignored) throws IOException {
-          return ReturnCode.INCLUDE;
-        }
-        @Override
-        public boolean isFamilyEssential(byte[] name) {
-          return Bytes.equals(name, cf_first);
-        }
-      };
+    Scan scan = new Scan();
+    scan.setLoadColumnFamiliesOnDemand(true);
+    Filter bogusFilter = new FilterBase() {
+      @Override
+      public ReturnCode filterCell(final Cell ignored) throws IOException {
+        return ReturnCode.INCLUDE;
+      }
+      @Override
+      public boolean isFamilyEssential(byte[] name) {
+        return Bytes.equals(name, cf_first);
+      }
+    };
 
-      scan.setFilter(bogusFilter);
-      InternalScanner s = region.getScanner(scan);
+    scan.setFilter(bogusFilter);
+    InternalScanner s = region.getScanner(scan);
 
-      // Our data looks like this:
-      // r0: first:a, first:b, second:a, second:b
-      // r1: first:a, first:b, second:a, second:b
-      // r2: first:a, first:b, second:a, second:b
-      // r3: first:a, first:b, second:a, second:b
-      // r4: first:a, first:b, second:a, second:b
-      // r5: first:a
-      // r6: first:a
-      // r7: first:a
-      // r8: first:a
-      // r9: first:a
+    // Our data looks like this:
+    // r0: first:a, first:b, second:a, second:b
+    // r1: first:a, first:b, second:a, second:b
+    // r2: first:a, first:b, second:a, second:b
+    // r3: first:a, first:b, second:a, second:b
+    // r4: first:a, first:b, second:a, second:b
+    // r5: first:a
+    // r6: first:a
+    // r7: first:a
+    // r8: first:a
+    // r9: first:a
 
-      // But due to next's limit set to 3, we should get this:
-      // r0: first:a, first:b, second:a
-      // r0: second:b
-      // r1: first:a, first:b, second:a
-      // r1: second:b
-      // r2: first:a, first:b, second:a
-      // r2: second:b
-      // r3: first:a, first:b, second:a
-      // r3: second:b
-      // r4: first:a, first:b, second:a
-      // r4: second:b
-      // r5: first:a
-      // r6: first:a
-      // r7: first:a
-      // r8: first:a
-      // r9: first:a
+    // But due to next's limit set to 3, we should get this:
+    // r0: first:a, first:b, second:a
+    // r0: second:b
+    // r1: first:a, first:b, second:a
+    // r1: second:b
+    // r2: first:a, first:b, second:a
+    // r2: second:b
+    // r3: first:a, first:b, second:a
+    // r3: second:b
+    // r4: first:a, first:b, second:a
+    // r4: second:b
+    // r5: first:a
+    // r6: first:a
+    // r7: first:a
+    // r8: first:a
+    // r9: first:a
 
-      List<Cell> results = new ArrayList<>();
-      int index = 0;
-      ScannerContext scannerContext = ScannerContext.newBuilder().setBatchLimit(3).build();
-      while (true) {
-        boolean more = s.next(results, scannerContext);
-        if ((index >> 1) < 5) {
-          if (index % 2 == 0) {
-            assertEquals(3, results.size());
-          } else {
-            assertEquals(1, results.size());
-          }
+    List<Cell> results = new ArrayList<>();
+    int index = 0;
+    ScannerContext scannerContext = ScannerContext.newBuilder().setBatchLimit(3).build();
+    while (true) {
+      boolean more = s.next(results, scannerContext);
+      if ((index >> 1) < 5) {
+        if (index % 2 == 0) {
+          assertEquals(3, results.size());
         } else {
           assertEquals(1, results.size());
         }
-        results.clear();
-        index++;
-        if (!more) {
-          break;
-        }
+      } else {
+        assertEquals(1, results.size());
       }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+      results.clear();
+      index++;
+      if (!more) {
+        break;
+      }
     }
   }
 
@@ -3601,8 +3416,6 @@ public class TestHRegion {
       region.put(p);
     }
     region.flush(false);
-    HBaseTestingUtility.closeRegionAndWAL(this.region);
-    this.region = null;
   }
 
   /**
@@ -4030,22 +3843,17 @@ public class TestHRegion {
     byte[] family = Bytes.toBytes("family");
     this.region = initHRegion(tableName, Bytes.toBytes("x"), Bytes.toBytes("z"), method, CONF,
         false, family);
+    byte[] rowNotServed = Bytes.toBytes("a");
+    Get g = new Get(rowNotServed);
     try {
-      byte[] rowNotServed = Bytes.toBytes("a");
-      Get g = new Get(rowNotServed);
-      try {
-        region.get(g);
-        fail();
-      } catch (WrongRegionException x) {
-        // OK
-      }
-      byte[] row = Bytes.toBytes("y");
-      g = new Get(row);
       region.get(g);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+      fail();
+    } catch (WrongRegionException x) {
+      // OK
     }
+    byte[] row = Bytes.toBytes("y");
+    g = new Get(row);
+    region.get(g);
   }
 
   @Test
@@ -4054,36 +3862,32 @@ public class TestHRegion {
 
     // Setting up region
     this.region = initHRegion(tableName, method, CONF, family);
-    try {
-      Put put = new Put(Bytes.toBytes(1L));
-      put.addColumn(family, qual1, 1L, Bytes.toBytes(1L));
-      region.put(put);
+    Put put = new Put(Bytes.toBytes(1L));
+    put.addColumn(family, qual1, 1L, Bytes.toBytes(1L));
+    region.put(put);
 
-      region.flush(true);
+    region.flush(true);
 
-      Delete delete = new Delete(Bytes.toBytes(1L), 1L);
-      region.delete(delete);
+    Delete delete = new Delete(Bytes.toBytes(1L), 1L);
+    region.delete(delete);
 
-      put = new Put(Bytes.toBytes(2L));
-      put.addColumn(family, qual1, 2L, Bytes.toBytes(2L));
-      region.put(put);
+    put = new Put(Bytes.toBytes(2L));
+    put.addColumn(family, qual1, 2L, Bytes.toBytes(2L));
+    region.put(put);
 
-      Scan idxScan = new Scan();
-      idxScan.addFamily(family);
-      idxScan.setFilter(new FilterList(FilterList.Operator.MUST_PASS_ALL, Arrays.<Filter> asList(
-          new SingleColumnValueFilter(family, qual1, CompareOp.GREATER_OR_EQUAL,
-              new BinaryComparator(Bytes.toBytes(0L))), new SingleColumnValueFilter(family, qual1,
-              CompareOp.LESS_OR_EQUAL, new BinaryComparator(Bytes.toBytes(3L))))));
-      InternalScanner scanner = region.getScanner(idxScan);
-      List<Cell> res = new ArrayList<>();
+    Scan idxScan = new Scan();
+    idxScan.addFamily(family);
+    idxScan.setFilter(new FilterList(FilterList.Operator.MUST_PASS_ALL, Arrays.<Filter> asList(
+        new SingleColumnValueFilter(family, qual1, CompareOp.GREATER_OR_EQUAL,
+            new BinaryComparator(Bytes.toBytes(0L))), new SingleColumnValueFilter(family, qual1,
+            CompareOp.LESS_OR_EQUAL, new BinaryComparator(Bytes.toBytes(3L))))));
+    InternalScanner scanner = region.getScanner(idxScan);
+    List<Cell> res = new ArrayList<>();
 
-      while (scanner.next(res))
-        ;
-      assertEquals(1L, res.size());
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    while (scanner.next(res)) {
+      // Ignore res value.
     }
+    assertEquals(1L, res.size());
   }
 
   // ////////////////////////////////////////////////////////////////////////////
@@ -4102,49 +3906,44 @@ public class TestHRegion {
     htd.addFamily(hcd);
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
     this.region = TEST_UTIL.createLocalHRegion(info, htd);
-    try {
-      int num_unique_rows = 10;
-      int duplicate_multiplier = 2;
-      int num_storefiles = 4;
+    int num_unique_rows = 10;
+    int duplicate_multiplier = 2;
+    int num_storefiles = 4;
 
-      int version = 0;
-      for (int f = 0; f < num_storefiles; f++) {
-        for (int i = 0; i < duplicate_multiplier; i++) {
-          for (int j = 0; j < num_unique_rows; j++) {
-            Put put = new Put(Bytes.toBytes("row" + j));
-            put.setDurability(Durability.SKIP_WAL);
-            long ts = version++;
-            put.addColumn(fam1, qf1, ts, val1);
-            region.put(put);
-          }
+    int version = 0;
+    for (int f = 0; f < num_storefiles; f++) {
+      for (int i = 0; i < duplicate_multiplier; i++) {
+        for (int j = 0; j < num_unique_rows; j++) {
+          Put put = new Put(Bytes.toBytes("row" + j));
+          put.setDurability(Durability.SKIP_WAL);
+          long ts = version++;
+          put.addColumn(fam1, qf1, ts, val1);
+          region.put(put);
         }
-        region.flush(true);
       }
-      // before compaction
-      HStore store = region.getStore(fam1);
-      Collection<HStoreFile> storeFiles = store.getStorefiles();
-      for (HStoreFile storefile : storeFiles) {
-        StoreFileReader reader = storefile.getReader();
-        reader.loadFileInfo();
-        reader.loadBloomfilter();
-        assertEquals(num_unique_rows * duplicate_multiplier, reader.getEntries());
-        assertEquals(num_unique_rows, reader.getFilterEntries());
-      }
+      region.flush(true);
+    }
+    // before compaction
+    HStore store = region.getStore(fam1);
+    Collection<HStoreFile> storeFiles = store.getStorefiles();
+    for (HStoreFile storefile : storeFiles) {
+      StoreFileReader reader = storefile.getReader();
+      reader.loadFileInfo();
+      reader.loadBloomfilter();
+      assertEquals(num_unique_rows * duplicate_multiplier, reader.getEntries());
+      assertEquals(num_unique_rows, reader.getFilterEntries());
+    }
 
-      region.compact(true);
+    region.compact(true);
 
-      // after compaction
-      storeFiles = store.getStorefiles();
-      for (HStoreFile storefile : storeFiles) {
-        StoreFileReader reader = storefile.getReader();
-        reader.loadFileInfo();
-        reader.loadBloomfilter();
-        assertEquals(num_unique_rows * duplicate_multiplier * num_storefiles, reader.getEntries());
-        assertEquals(num_unique_rows, reader.getFilterEntries());
-      }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // after compaction
+    storeFiles = store.getStorefiles();
+    for (HStoreFile storefile : storeFiles) {
+      StoreFileReader reader = storefile.getReader();
+      reader.loadFileInfo();
+      reader.loadBloomfilter();
+      assertEquals(num_unique_rows * duplicate_multiplier * num_storefiles, reader.getEntries());
+      assertEquals(num_unique_rows, reader.getFilterEntries());
     }
   }
 
@@ -4160,35 +3959,30 @@ public class TestHRegion {
     htd.addFamily(hcd);
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
     this.region = TEST_UTIL.createLocalHRegion(info, htd);
-    try {
-      // For row:0, col:0: insert versions 1 through 5.
-      byte row[] = Bytes.toBytes("row:" + 0);
-      byte column[] = Bytes.toBytes("column:" + 0);
-      Put put = new Put(row);
-      put.setDurability(Durability.SKIP_WAL);
-      for (long idx = 1; idx <= 4; idx++) {
-        put.addColumn(FAMILY, column, idx, Bytes.toBytes("value-version-" + idx));
-      }
-      region.put(put);
-
-      // Flush
-      region.flush(true);
-
-      // Get rows
-      Get get = new Get(row);
-      get.setMaxVersions();
-      Cell[] kvs = region.get(get).rawCells();
-
-      // Check if rows are correct
-      assertEquals(4, kvs.length);
-      checkOneCell(kvs[0], FAMILY, 0, 0, 4);
-      checkOneCell(kvs[1], FAMILY, 0, 0, 3);
-      checkOneCell(kvs[2], FAMILY, 0, 0, 2);
-      checkOneCell(kvs[3], FAMILY, 0, 0, 1);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // For row:0, col:0: insert versions 1 through 5.
+    byte[] row = Bytes.toBytes("row:" + 0);
+    byte[] column = Bytes.toBytes("column:" + 0);
+    Put put = new Put(row);
+    put.setDurability(Durability.SKIP_WAL);
+    for (long idx = 1; idx <= 4; idx++) {
+      put.addColumn(FAMILY, column, idx, Bytes.toBytes("value-version-" + idx));
     }
+    region.put(put);
+
+    // Flush
+    region.flush(true);
+
+    // Get rows
+    Get get = new Get(row);
+    get.setMaxVersions();
+    Cell[] kvs = region.get(get).rawCells();
+
+    // Check if rows are correct
+    assertEquals(4, kvs.length);
+    checkOneCell(kvs[0], FAMILY, 0, 0, 4);
+    checkOneCell(kvs[1], FAMILY, 0, 0, 3);
+    checkOneCell(kvs[2], FAMILY, 0, 0, 2);
+    checkOneCell(kvs[3], FAMILY, 0, 0, 1);
   }
 
   /**
@@ -4208,30 +4002,25 @@ public class TestHRegion {
     htd.addFamily(hcd);
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
     this.region = TEST_UTIL.createLocalHRegion(info, htd);
-    try {
-      // Insert some data
-      byte row[] = Bytes.toBytes("row1");
-      byte col[] = Bytes.toBytes("col1");
+    // Insert some data
+    byte[] row = Bytes.toBytes("row1");
+    byte[] col = Bytes.toBytes("col1");
 
-      Put put = new Put(row);
-      put.addColumn(familyName, col, 1, Bytes.toBytes("SomeRandomValue"));
-      region.put(put);
-      region.flush(true);
+    Put put = new Put(row);
+    put.addColumn(familyName, col, 1, Bytes.toBytes("SomeRandomValue"));
+    region.put(put);
+    region.flush(true);
 
-      Delete del = new Delete(row);
-      region.delete(del);
-      region.flush(true);
+    Delete del = new Delete(row);
+    region.delete(del);
+    region.flush(true);
 
-      // Get remaining rows (should have none)
-      Get get = new Get(row);
-      get.addColumn(familyName, col);
+    // Get remaining rows (should have none)
+    Get get = new Get(row);
+    get.addColumn(familyName, col);
 
-      Cell[] keyValues = region.get(get).rawCells();
-      assertTrue(keyValues.length == 0);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    Cell[] keyValues = region.get(get).rawCells();
+    assertEquals(0, keyValues.length);
   }
 
   @Test
@@ -4252,7 +4041,9 @@ public class TestHRegion {
     int regionServersCount = 3;
 
     try {
-      cluster = htu.startMiniCluster(1, regionServersCount, dataNodeHosts);
+      StartMiniClusterOption option = StartMiniClusterOption.builder()
+          .numRegionServers(regionServersCount).dataNodeHosts(dataNodeHosts).build();
+      cluster = htu.startMiniCluster(option);
       byte[][] families = { fam1, fam2 };
       Table ht = htu.createTable(tableName, families);
 
@@ -4336,8 +4127,6 @@ public class TestHRegion {
           break;
         }
       }
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(region);
     }
   }
 
@@ -4355,7 +4144,7 @@ public class TestHRegion {
     HRegionInfo hri = new HRegionInfo(htd.getTableName());
 
     // Create a region and skip the initialization (like CreateTableHandler)
-    HRegion region = HBaseTestingUtility.createRegionAndWAL(hri, rootDir, CONF, htd, false);
+    region = HBaseTestingUtility.createRegionAndWAL(hri, rootDir, CONF, htd, false);
     Path regionDir = region.getRegionFileSystem().getRegionDir();
     FileSystem fs = region.getRegionFileSystem().getFileSystem();
     HBaseTestingUtility.closeRegionAndWAL(region);
@@ -4388,6 +4177,8 @@ public class TestHRegion {
     // Verify that the .regioninfo file is still there
     assertTrue(HRegionFileSystem.REGION_INFO_FILE + " should be present in the region dir",
         fs.exists(new Path(regionDir, HRegionFileSystem.REGION_INFO_FILE)));
+
+    region = null;
   }
 
   /**
@@ -4474,7 +4265,6 @@ public class TestHRegion {
     assertEquals(1, kvs.size());
     Cell kv = kvs.get(0);
     assertEquals(expected, Bytes.toLong(kv.getValueArray(), kv.getValueOffset()));
-    this.region = null;
   }
 
   /**
@@ -4567,7 +4357,6 @@ public class TestHRegion {
     byte[] appendResult = new byte[kv.getValueLength()];
     System.arraycopy(kv.getValueArray(), kv.getValueOffset(), appendResult, 0, kv.getValueLength());
     assertArrayEquals(expected, appendResult);
-    this.region = null;
   }
 
   /**
@@ -4691,7 +4480,7 @@ public class TestHRegion {
     // XXX: The spied AsyncFSWAL can not work properly because of a Mockito defect that can not
     // deal with classes which have a field of an inner class. See discussions in HBASE-15536.
     walConf.set(WALFactory.WAL_PROVIDER, "filesystem");
-    final WALFactory wals = new WALFactory(walConf, UUID.randomUUID().toString());
+    final WALFactory wals = new WALFactory(walConf, TEST_UTIL.getRandomUUID().toString());
     final WAL wal = spy(wals.getWAL(RegionInfoBuilder.newBuilder(tableName).build()));
     this.region = initHRegion(tableName, HConstants.EMPTY_START_ROW,
         HConstants.EMPTY_END_ROW, false, tableDurability, wal,
@@ -5061,7 +4850,6 @@ public class TestHRegion {
       String callingMethod, Configuration conf, boolean isReadOnly, byte[]... families)
       throws IOException {
     Path logDir = TEST_UTIL.getDataTestDirOnTestFS(callingMethod + ".log");
-    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
     HRegionInfo hri = new HRegionInfo(tableName, startKey, stopKey);
     final WAL wal = HBaseTestingUtility.createWal(conf, logDir, hri);
     return initHRegion(tableName, startKey, stopKey, isReadOnly,
@@ -5074,6 +4862,7 @@ public class TestHRegion {
    */
   public HRegion initHRegion(TableName tableName, byte[] startKey, byte[] stopKey,
       boolean isReadOnly, Durability durability, WAL wal, byte[]... families) throws IOException {
+    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
     return TEST_UTIL.createLocalHRegion(tableName, startKey, stopKey,
         isReadOnly, durability, wal, families);
   }
@@ -5106,51 +4895,46 @@ public class TestHRegion {
     byte[] col = Bytes.toBytes("C");
     long ts = 1;
     this.region = initHRegion(tableName, method, families);
-    try {
-      KeyValue kv1 = new KeyValue(rowC, cf, col, ts, KeyValue.Type.Put, null);
-      KeyValue kv11 = new KeyValue(rowC, cf, col, ts + 1, KeyValue.Type.Put,
-          null);
-      KeyValue kv2 = new KeyValue(rowA, cf, col, ts, KeyValue.Type.Put, null);
-      KeyValue kv3 = new KeyValue(rowB, cf, col, ts, KeyValue.Type.Put, null);
-      Put put = null;
-      put = new Put(rowC);
-      put.add(kv1);
-      put.add(kv11);
-      region.put(put);
-      put = new Put(rowA);
-      put.add(kv2);
-      region.put(put);
-      put = new Put(rowB);
-      put.add(kv3);
-      region.put(put);
+    KeyValue kv1 = new KeyValue(rowC, cf, col, ts, KeyValue.Type.Put, null);
+    KeyValue kv11 = new KeyValue(rowC, cf, col, ts + 1, KeyValue.Type.Put,
+        null);
+    KeyValue kv2 = new KeyValue(rowA, cf, col, ts, KeyValue.Type.Put, null);
+    KeyValue kv3 = new KeyValue(rowB, cf, col, ts, KeyValue.Type.Put, null);
+    Put put = null;
+    put = new Put(rowC);
+    put.add(kv1);
+    put.add(kv11);
+    region.put(put);
+    put = new Put(rowA);
+    put.add(kv2);
+    region.put(put);
+    put = new Put(rowB);
+    put.add(kv3);
+    region.put(put);
 
-      Scan scan = new Scan(rowC);
-      scan.setMaxVersions(5);
-      scan.setReversed(true);
-      InternalScanner scanner = region.getScanner(scan);
-      List<Cell> currRow = new ArrayList<>();
-      boolean hasNext = scanner.next(currRow);
-      assertEquals(2, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowC, 0, rowC.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowB, 0, rowB.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowA, 0, rowA.length));
-      assertFalse(hasNext);
-      scanner.close();
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    Scan scan = new Scan(rowC);
+    scan.setMaxVersions(5);
+    scan.setReversed(true);
+    InternalScanner scanner = region.getScanner(scan);
+    List<Cell> currRow = new ArrayList<>();
+    boolean hasNext = scanner.next(currRow);
+    assertEquals(2, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowC, 0, rowC.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowB, 0, rowB.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowA, 0, rowA.length));
+    assertFalse(hasNext);
+    scanner.close();
   }
 
   @Test
@@ -5165,51 +4949,46 @@ public class TestHRegion {
     byte[] col = Bytes.toBytes("C");
     long ts = 1;
     this.region = initHRegion(tableName, method, families);
-    try {
-      KeyValue kv1 = new KeyValue(rowC, cf, col, ts, KeyValue.Type.Put, null);
-      KeyValue kv11 = new KeyValue(rowC, cf, col, ts + 1, KeyValue.Type.Put,
-          null);
-      KeyValue kv2 = new KeyValue(rowA, cf, col, ts, KeyValue.Type.Put, null);
-      KeyValue kv3 = new KeyValue(rowB, cf, col, ts, KeyValue.Type.Put, null);
-      Put put = null;
-      put = new Put(rowC);
-      put.add(kv1);
-      put.add(kv11);
-      region.put(put);
-      put = new Put(rowA);
-      put.add(kv2);
-      region.put(put);
-      put = new Put(rowB);
-      put.add(kv3);
-      region.put(put);
+    KeyValue kv1 = new KeyValue(rowC, cf, col, ts, KeyValue.Type.Put, null);
+    KeyValue kv11 = new KeyValue(rowC, cf, col, ts + 1, KeyValue.Type.Put,
+        null);
+    KeyValue kv2 = new KeyValue(rowA, cf, col, ts, KeyValue.Type.Put, null);
+    KeyValue kv3 = new KeyValue(rowB, cf, col, ts, KeyValue.Type.Put, null);
+    Put put = null;
+    put = new Put(rowC);
+    put.add(kv1);
+    put.add(kv11);
+    region.put(put);
+    put = new Put(rowA);
+    put.add(kv2);
+    region.put(put);
+    put = new Put(rowB);
+    put.add(kv3);
+    region.put(put);
 
-      Scan scan = new Scan(rowD);
-      List<Cell> currRow = new ArrayList<>();
-      scan.setReversed(true);
-      scan.setMaxVersions(5);
-      InternalScanner scanner = region.getScanner(scan);
-      boolean hasNext = scanner.next(currRow);
-      assertEquals(2, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowC, 0, rowC.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowB, 0, rowB.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowA, 0, rowA.length));
-      assertFalse(hasNext);
-      scanner.close();
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    Scan scan = new Scan(rowD);
+    List<Cell> currRow = new ArrayList<>();
+    scan.setReversed(true);
+    scan.setMaxVersions(5);
+    InternalScanner scanner = region.getScanner(scan);
+    boolean hasNext = scanner.next(currRow);
+    assertEquals(2, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowC, 0, rowC.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowB, 0, rowB.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowA, 0, rowA.length));
+    assertFalse(hasNext);
+    scanner.close();
   }
 
   @Test
@@ -5223,49 +5002,44 @@ public class TestHRegion {
     byte[] col = Bytes.toBytes("C");
     long ts = 1;
     this.region = initHRegion(tableName, method, families);
-    try {
-      KeyValue kv1 = new KeyValue(rowC, cf, col, ts, KeyValue.Type.Put, null);
-      KeyValue kv11 = new KeyValue(rowC, cf, col, ts + 1, KeyValue.Type.Put,
-          null);
-      KeyValue kv2 = new KeyValue(rowA, cf, col, ts, KeyValue.Type.Put, null);
-      KeyValue kv3 = new KeyValue(rowB, cf, col, ts, KeyValue.Type.Put, null);
-      Put put = null;
-      put = new Put(rowC);
-      put.add(kv1);
-      put.add(kv11);
-      region.put(put);
-      put = new Put(rowA);
-      put.add(kv2);
-      region.put(put);
-      put = new Put(rowB);
-      put.add(kv3);
-      region.put(put);
-      Scan scan = new Scan();
-      List<Cell> currRow = new ArrayList<>();
-      scan.setReversed(true);
-      InternalScanner scanner = region.getScanner(scan);
-      boolean hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowC, 0, rowC.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowB, 0, rowB.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowA, 0, rowA.length));
-      assertFalse(hasNext);
-      scanner.close();
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    KeyValue kv1 = new KeyValue(rowC, cf, col, ts, KeyValue.Type.Put, null);
+    KeyValue kv11 = new KeyValue(rowC, cf, col, ts + 1, KeyValue.Type.Put,
+        null);
+    KeyValue kv2 = new KeyValue(rowA, cf, col, ts, KeyValue.Type.Put, null);
+    KeyValue kv3 = new KeyValue(rowB, cf, col, ts, KeyValue.Type.Put, null);
+    Put put = null;
+    put = new Put(rowC);
+    put.add(kv1);
+    put.add(kv11);
+    region.put(put);
+    put = new Put(rowA);
+    put.add(kv2);
+    region.put(put);
+    put = new Put(rowB);
+    put.add(kv3);
+    region.put(put);
+    Scan scan = new Scan();
+    List<Cell> currRow = new ArrayList<>();
+    scan.setReversed(true);
+    InternalScanner scanner = region.getScanner(scan);
+    boolean hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowC, 0, rowC.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowB, 0, rowB.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowA, 0, rowA.length));
+    assertFalse(hasNext);
+    scanner.close();
   }
 
   @Test
@@ -5282,71 +5056,66 @@ public class TestHRegion {
     byte[] col2 = Bytes.toBytes("col2");
     long ts = 1;
     this.region = initHRegion(tableName, method, families);
-    try {
-      KeyValue kv1 = new KeyValue(rowA, cf, col1, ts, KeyValue.Type.Put, null);
-      KeyValue kv2 = new KeyValue(rowB, cf, col1, ts, KeyValue.Type.Put, null);
-      KeyValue kv3 = new KeyValue(rowC, cf, col1, ts, KeyValue.Type.Put, null);
-      KeyValue kv4_1 = new KeyValue(rowD, cf, col1, ts, KeyValue.Type.Put, null);
-      KeyValue kv4_2 = new KeyValue(rowD, cf, col2, ts, KeyValue.Type.Put, null);
-      KeyValue kv5 = new KeyValue(rowE, cf, col1, ts, KeyValue.Type.Put, null);
-      Put put = null;
-      put = new Put(rowA);
-      put.add(kv1);
-      region.put(put);
-      put = new Put(rowB);
-      put.add(kv2);
-      region.put(put);
-      put = new Put(rowC);
-      put.add(kv3);
-      region.put(put);
-      put = new Put(rowD);
-      put.add(kv4_1);
-      region.put(put);
-      put = new Put(rowD);
-      put.add(kv4_2);
-      region.put(put);
-      put = new Put(rowE);
-      put.add(kv5);
-      region.put(put);
-      region.flush(true);
-      Scan scan = new Scan(rowD, rowA);
-      scan.addColumn(families[0], col1);
-      scan.setReversed(true);
-      List<Cell> currRow = new ArrayList<>();
-      InternalScanner scanner = region.getScanner(scan);
-      boolean hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowD, 0, rowD.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowC, 0, rowC.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowB, 0, rowB.length));
-      assertFalse(hasNext);
-      scanner.close();
+    KeyValue kv1 = new KeyValue(rowA, cf, col1, ts, KeyValue.Type.Put, null);
+    KeyValue kv2 = new KeyValue(rowB, cf, col1, ts, KeyValue.Type.Put, null);
+    KeyValue kv3 = new KeyValue(rowC, cf, col1, ts, KeyValue.Type.Put, null);
+    KeyValue kv4_1 = new KeyValue(rowD, cf, col1, ts, KeyValue.Type.Put, null);
+    KeyValue kv4_2 = new KeyValue(rowD, cf, col2, ts, KeyValue.Type.Put, null);
+    KeyValue kv5 = new KeyValue(rowE, cf, col1, ts, KeyValue.Type.Put, null);
+    Put put = null;
+    put = new Put(rowA);
+    put.add(kv1);
+    region.put(put);
+    put = new Put(rowB);
+    put.add(kv2);
+    region.put(put);
+    put = new Put(rowC);
+    put.add(kv3);
+    region.put(put);
+    put = new Put(rowD);
+    put.add(kv4_1);
+    region.put(put);
+    put = new Put(rowD);
+    put.add(kv4_2);
+    region.put(put);
+    put = new Put(rowE);
+    put.add(kv5);
+    region.put(put);
+    region.flush(true);
+    Scan scan = new Scan(rowD, rowA);
+    scan.addColumn(families[0], col1);
+    scan.setReversed(true);
+    List<Cell> currRow = new ArrayList<>();
+    InternalScanner scanner = region.getScanner(scan);
+    boolean hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowD, 0, rowD.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowC, 0, rowC.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowB, 0, rowB.length));
+    assertFalse(hasNext);
+    scanner.close();
 
-      scan = new Scan(rowD, rowA);
-      scan.addColumn(families[0], col2);
-      scan.setReversed(true);
-      currRow.clear();
-      scanner = region.getScanner(scan);
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowD, 0, rowD.length));
-      scanner.close();
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    scan = new Scan(rowD, rowA);
+    scan.addColumn(families[0], col2);
+    scan.setReversed(true);
+    currRow.clear();
+    scanner = region.getScanner(scan);
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowD, 0, rowD.length));
+    scanner.close();
   }
 
   @Test
@@ -5365,71 +5134,66 @@ public class TestHRegion {
     HBaseConfiguration config = new HBaseConfiguration();
     config.setInt("test.block.size", 1);
     this.region = initHRegion(tableName, method, config, families);
-    try {
-      KeyValue kv1 = new KeyValue(rowA, cf, col1, ts, KeyValue.Type.Put, null);
-      KeyValue kv2 = new KeyValue(rowB, cf, col1, ts, KeyValue.Type.Put, null);
-      KeyValue kv3 = new KeyValue(rowC, cf, col1, ts, KeyValue.Type.Put, null);
-      KeyValue kv4_1 = new KeyValue(rowD, cf, col1, ts, KeyValue.Type.Put, null);
-      KeyValue kv4_2 = new KeyValue(rowD, cf, col2, ts, KeyValue.Type.Put, null);
-      KeyValue kv5 = new KeyValue(rowE, cf, col1, ts, KeyValue.Type.Put, null);
-      Put put = null;
-      put = new Put(rowA);
-      put.add(kv1);
-      region.put(put);
-      put = new Put(rowB);
-      put.add(kv2);
-      region.put(put);
-      put = new Put(rowC);
-      put.add(kv3);
-      region.put(put);
-      put = new Put(rowD);
-      put.add(kv4_1);
-      region.put(put);
-      put = new Put(rowD);
-      put.add(kv4_2);
-      region.put(put);
-      put = new Put(rowE);
-      put.add(kv5);
-      region.put(put);
-      region.flush(true);
-      Scan scan = new Scan(rowD, rowA);
-      scan.addColumn(families[0], col1);
-      scan.setReversed(true);
-      List<Cell> currRow = new ArrayList<>();
-      InternalScanner scanner = region.getScanner(scan);
-      boolean hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowD, 0, rowD.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowC, 0, rowC.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowB, 0, rowB.length));
-      assertFalse(hasNext);
-      scanner.close();
+    KeyValue kv1 = new KeyValue(rowA, cf, col1, ts, KeyValue.Type.Put, null);
+    KeyValue kv2 = new KeyValue(rowB, cf, col1, ts, KeyValue.Type.Put, null);
+    KeyValue kv3 = new KeyValue(rowC, cf, col1, ts, KeyValue.Type.Put, null);
+    KeyValue kv4_1 = new KeyValue(rowD, cf, col1, ts, KeyValue.Type.Put, null);
+    KeyValue kv4_2 = new KeyValue(rowD, cf, col2, ts, KeyValue.Type.Put, null);
+    KeyValue kv5 = new KeyValue(rowE, cf, col1, ts, KeyValue.Type.Put, null);
+    Put put = null;
+    put = new Put(rowA);
+    put.add(kv1);
+    region.put(put);
+    put = new Put(rowB);
+    put.add(kv2);
+    region.put(put);
+    put = new Put(rowC);
+    put.add(kv3);
+    region.put(put);
+    put = new Put(rowD);
+    put.add(kv4_1);
+    region.put(put);
+    put = new Put(rowD);
+    put.add(kv4_2);
+    region.put(put);
+    put = new Put(rowE);
+    put.add(kv5);
+    region.put(put);
+    region.flush(true);
+    Scan scan = new Scan(rowD, rowA);
+    scan.addColumn(families[0], col1);
+    scan.setReversed(true);
+    List<Cell> currRow = new ArrayList<>();
+    InternalScanner scanner = region.getScanner(scan);
+    boolean hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowD, 0, rowD.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowC, 0, rowC.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowB, 0, rowB.length));
+    assertFalse(hasNext);
+    scanner.close();
 
-      scan = new Scan(rowD, rowA);
-      scan.addColumn(families[0], col2);
-      scan.setReversed(true);
-      currRow.clear();
-      scanner = region.getScanner(scan);
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), rowD, 0, rowD.length));
-      scanner.close();
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    scan = new Scan(rowD, rowA);
+    scan.addColumn(families[0], col2);
+    scan.setReversed(true);
+    currRow.clear();
+    scanner = region.getScanner(scan);
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), rowD, 0, rowD.length));
+    scanner.close();
   }
 
   @Test
@@ -5451,153 +5215,148 @@ public class TestHRegion {
     // disable compactions in this test.
     conf.setInt("hbase.hstore.compactionThreshold", 10000);
     this.region = initHRegion(tableName, method, conf, families);
-    try {
-      // kv naming style: kv(row number) totalKvCountInThisRow seq no
-      KeyValue kv0_1_1 = new KeyValue(row0, cf1, col, ts, KeyValue.Type.Put,
-          null);
-      KeyValue kv1_2_1 = new KeyValue(row1, cf2, col, ts, KeyValue.Type.Put,
-          null);
-      KeyValue kv1_2_2 = new KeyValue(row1, cf1, col, ts + 1,
-          KeyValue.Type.Put, null);
-      KeyValue kv2_4_1 = new KeyValue(row2, cf2, col, ts, KeyValue.Type.Put,
-          null);
-      KeyValue kv2_4_2 = new KeyValue(row2, cf1, col, ts, KeyValue.Type.Put,
-          null);
-      KeyValue kv2_4_3 = new KeyValue(row2, cf3, col, ts, KeyValue.Type.Put,
-          null);
-      KeyValue kv2_4_4 = new KeyValue(row2, cf1, col, ts + 4,
-          KeyValue.Type.Put, null);
-      KeyValue kv3_2_1 = new KeyValue(row3, cf2, col, ts, KeyValue.Type.Put,
-          null);
-      KeyValue kv3_2_2 = new KeyValue(row3, cf1, col, ts + 4,
-          KeyValue.Type.Put, null);
-      KeyValue kv4_5_1 = new KeyValue(row4, cf1, col, ts, KeyValue.Type.Put,
-          null);
-      KeyValue kv4_5_2 = new KeyValue(row4, cf3, col, ts, KeyValue.Type.Put,
-          null);
-      KeyValue kv4_5_3 = new KeyValue(row4, cf3, col, ts + 5,
-          KeyValue.Type.Put, null);
-      KeyValue kv4_5_4 = new KeyValue(row4, cf2, col, ts, KeyValue.Type.Put,
-          null);
-      KeyValue kv4_5_5 = new KeyValue(row4, cf1, col, ts + 3,
-          KeyValue.Type.Put, null);
-      KeyValue kv5_2_1 = new KeyValue(row5, cf2, col, ts, KeyValue.Type.Put,
-          null);
-      KeyValue kv5_2_2 = new KeyValue(row5, cf3, col, ts, KeyValue.Type.Put,
-          null);
-      // hfiles(cf1/cf2) :"row1"(1 kv) / "row2"(1 kv) / "row4"(2 kv)
-      Put put = null;
-      put = new Put(row1);
-      put.add(kv1_2_1);
-      region.put(put);
-      put = new Put(row2);
-      put.add(kv2_4_1);
-      region.put(put);
-      put = new Put(row4);
-      put.add(kv4_5_4);
-      put.add(kv4_5_5);
-      region.put(put);
-      region.flush(true);
-      // hfiles(cf1/cf3) : "row1" (1 kvs) / "row2" (1 kv) / "row4" (2 kv)
-      put = new Put(row4);
-      put.add(kv4_5_1);
-      put.add(kv4_5_3);
-      region.put(put);
-      put = new Put(row1);
-      put.add(kv1_2_2);
-      region.put(put);
-      put = new Put(row2);
-      put.add(kv2_4_4);
-      region.put(put);
-      region.flush(true);
-      // hfiles(cf1/cf3) : "row2"(2 kv) / "row3"(1 kvs) / "row4" (1 kv)
-      put = new Put(row4);
-      put.add(kv4_5_2);
-      region.put(put);
-      put = new Put(row2);
-      put.add(kv2_4_2);
-      put.add(kv2_4_3);
-      region.put(put);
-      put = new Put(row3);
-      put.add(kv3_2_2);
-      region.put(put);
-      region.flush(true);
-      // memstore(cf1/cf2/cf3) : "row0" (1 kvs) / "row3" ( 1 kv) / "row5" (max)
-      // ( 2 kv)
-      put = new Put(row0);
-      put.add(kv0_1_1);
-      region.put(put);
-      put = new Put(row3);
-      put.add(kv3_2_1);
-      region.put(put);
-      put = new Put(row5);
-      put.add(kv5_2_1);
-      put.add(kv5_2_2);
-      region.put(put);
-      // scan range = ["row4", min), skip the max "row5"
-      Scan scan = new Scan(row4);
-      scan.setMaxVersions(5);
-      scan.setBatch(3);
-      scan.setReversed(true);
-      InternalScanner scanner = region.getScanner(scan);
-      List<Cell> currRow = new ArrayList<>();
-      boolean hasNext = false;
-      // 1. scan out "row4" (5 kvs), "row5" can't be scanned out since not
-      // included in scan range
-      // "row4" takes 2 next() calls since batch=3
-      hasNext = scanner.next(currRow);
-      assertEquals(3, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), row4, 0, row4.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(2, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(),
-          currRow.get(0).getRowLength(), row4, 0,
-        row4.length));
-      assertTrue(hasNext);
-      // 2. scan out "row3" (2 kv)
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(2, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), row3, 0, row3.length));
-      assertTrue(hasNext);
-      // 3. scan out "row2" (4 kvs)
-      // "row2" takes 2 next() calls since batch=3
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(3, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), row2, 0, row2.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), row2, 0, row2.length));
-      assertTrue(hasNext);
-      // 4. scan out "row1" (2 kv)
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(2, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), row1, 0, row1.length));
-      assertTrue(hasNext);
-      // 5. scan out "row0" (1 kv)
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), row0, 0, row0.length));
-      assertFalse(hasNext);
+    // kv naming style: kv(row number) totalKvCountInThisRow seq no
+    KeyValue kv0_1_1 = new KeyValue(row0, cf1, col, ts, KeyValue.Type.Put,
+        null);
+    KeyValue kv1_2_1 = new KeyValue(row1, cf2, col, ts, KeyValue.Type.Put,
+        null);
+    KeyValue kv1_2_2 = new KeyValue(row1, cf1, col, ts + 1,
+        KeyValue.Type.Put, null);
+    KeyValue kv2_4_1 = new KeyValue(row2, cf2, col, ts, KeyValue.Type.Put,
+        null);
+    KeyValue kv2_4_2 = new KeyValue(row2, cf1, col, ts, KeyValue.Type.Put,
+        null);
+    KeyValue kv2_4_3 = new KeyValue(row2, cf3, col, ts, KeyValue.Type.Put,
+        null);
+    KeyValue kv2_4_4 = new KeyValue(row2, cf1, col, ts + 4,
+        KeyValue.Type.Put, null);
+    KeyValue kv3_2_1 = new KeyValue(row3, cf2, col, ts, KeyValue.Type.Put,
+        null);
+    KeyValue kv3_2_2 = new KeyValue(row3, cf1, col, ts + 4,
+        KeyValue.Type.Put, null);
+    KeyValue kv4_5_1 = new KeyValue(row4, cf1, col, ts, KeyValue.Type.Put,
+        null);
+    KeyValue kv4_5_2 = new KeyValue(row4, cf3, col, ts, KeyValue.Type.Put,
+        null);
+    KeyValue kv4_5_3 = new KeyValue(row4, cf3, col, ts + 5,
+        KeyValue.Type.Put, null);
+    KeyValue kv4_5_4 = new KeyValue(row4, cf2, col, ts, KeyValue.Type.Put,
+        null);
+    KeyValue kv4_5_5 = new KeyValue(row4, cf1, col, ts + 3,
+        KeyValue.Type.Put, null);
+    KeyValue kv5_2_1 = new KeyValue(row5, cf2, col, ts, KeyValue.Type.Put,
+        null);
+    KeyValue kv5_2_2 = new KeyValue(row5, cf3, col, ts, KeyValue.Type.Put,
+        null);
+    // hfiles(cf1/cf2) :"row1"(1 kv) / "row2"(1 kv) / "row4"(2 kv)
+    Put put = null;
+    put = new Put(row1);
+    put.add(kv1_2_1);
+    region.put(put);
+    put = new Put(row2);
+    put.add(kv2_4_1);
+    region.put(put);
+    put = new Put(row4);
+    put.add(kv4_5_4);
+    put.add(kv4_5_5);
+    region.put(put);
+    region.flush(true);
+    // hfiles(cf1/cf3) : "row1" (1 kvs) / "row2" (1 kv) / "row4" (2 kv)
+    put = new Put(row4);
+    put.add(kv4_5_1);
+    put.add(kv4_5_3);
+    region.put(put);
+    put = new Put(row1);
+    put.add(kv1_2_2);
+    region.put(put);
+    put = new Put(row2);
+    put.add(kv2_4_4);
+    region.put(put);
+    region.flush(true);
+    // hfiles(cf1/cf3) : "row2"(2 kv) / "row3"(1 kvs) / "row4" (1 kv)
+    put = new Put(row4);
+    put.add(kv4_5_2);
+    region.put(put);
+    put = new Put(row2);
+    put.add(kv2_4_2);
+    put.add(kv2_4_3);
+    region.put(put);
+    put = new Put(row3);
+    put.add(kv3_2_2);
+    region.put(put);
+    region.flush(true);
+    // memstore(cf1/cf2/cf3) : "row0" (1 kvs) / "row3" ( 1 kv) / "row5" (max)
+    // ( 2 kv)
+    put = new Put(row0);
+    put.add(kv0_1_1);
+    region.put(put);
+    put = new Put(row3);
+    put.add(kv3_2_1);
+    region.put(put);
+    put = new Put(row5);
+    put.add(kv5_2_1);
+    put.add(kv5_2_2);
+    region.put(put);
+    // scan range = ["row4", min), skip the max "row5"
+    Scan scan = new Scan(row4);
+    scan.setMaxVersions(5);
+    scan.setBatch(3);
+    scan.setReversed(true);
+    InternalScanner scanner = region.getScanner(scan);
+    List<Cell> currRow = new ArrayList<>();
+    boolean hasNext = false;
+    // 1. scan out "row4" (5 kvs), "row5" can't be scanned out since not
+    // included in scan range
+    // "row4" takes 2 next() calls since batch=3
+    hasNext = scanner.next(currRow);
+    assertEquals(3, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), row4, 0, row4.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(2, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(),
+        currRow.get(0).getRowLength(), row4, 0,
+      row4.length));
+    assertTrue(hasNext);
+    // 2. scan out "row3" (2 kv)
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(2, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), row3, 0, row3.length));
+    assertTrue(hasNext);
+    // 3. scan out "row2" (4 kvs)
+    // "row2" takes 2 next() calls since batch=3
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(3, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), row2, 0, row2.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), row2, 0, row2.length));
+    assertTrue(hasNext);
+    // 4. scan out "row1" (2 kv)
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(2, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), row1, 0, row1.length));
+    assertTrue(hasNext);
+    // 5. scan out "row0" (1 kv)
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), row0, 0, row0.length));
+    assertFalse(hasNext);
 
-      scanner.close();
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    scanner.close();
   }
 
   @Test
@@ -5618,63 +5377,58 @@ public class TestHRegion {
     // disable compactions in this test.
     conf.setInt("hbase.hstore.compactionThreshold", 10000);
     this.region = initHRegion(tableName, method, conf, families);
-    try {
-      KeyValue kv1 = new KeyValue(row1, cf1, col, ts, KeyValue.Type.Put, null);
-      KeyValue kv2 = new KeyValue(row2, cf2, col, ts, KeyValue.Type.Put, null);
-      KeyValue kv3 = new KeyValue(row3, cf3, col, ts, KeyValue.Type.Put, null);
-      KeyValue kv4 = new KeyValue(row4, cf4, col, ts, KeyValue.Type.Put, null);
-      // storefile1
-      Put put = new Put(row1);
-      put.add(kv1);
-      region.put(put);
-      region.flush(true);
-      // storefile2
-      put = new Put(row2);
-      put.add(kv2);
-      region.put(put);
-      region.flush(true);
-      // storefile3
-      put = new Put(row3);
-      put.add(kv3);
-      region.put(put);
-      region.flush(true);
-      // memstore
-      put = new Put(row4);
-      put.add(kv4);
-      region.put(put);
-      // scan range = ["row4", min)
-      Scan scan = new Scan(row4);
-      scan.setReversed(true);
-      scan.setBatch(10);
-      InternalScanner scanner = region.getScanner(scan);
-      List<Cell> currRow = new ArrayList<>();
-      boolean hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), row4, 0, row4.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), row3, 0, row3.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), row2, 0, row2.length));
-      assertTrue(hasNext);
-      currRow.clear();
-      hasNext = scanner.next(currRow);
-      assertEquals(1, currRow.size());
-      assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
-          .get(0).getRowLength(), row1, 0, row1.length));
-      assertFalse(hasNext);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    KeyValue kv1 = new KeyValue(row1, cf1, col, ts, KeyValue.Type.Put, null);
+    KeyValue kv2 = new KeyValue(row2, cf2, col, ts, KeyValue.Type.Put, null);
+    KeyValue kv3 = new KeyValue(row3, cf3, col, ts, KeyValue.Type.Put, null);
+    KeyValue kv4 = new KeyValue(row4, cf4, col, ts, KeyValue.Type.Put, null);
+    // storefile1
+    Put put = new Put(row1);
+    put.add(kv1);
+    region.put(put);
+    region.flush(true);
+    // storefile2
+    put = new Put(row2);
+    put.add(kv2);
+    region.put(put);
+    region.flush(true);
+    // storefile3
+    put = new Put(row3);
+    put.add(kv3);
+    region.put(put);
+    region.flush(true);
+    // memstore
+    put = new Put(row4);
+    put.add(kv4);
+    region.put(put);
+    // scan range = ["row4", min)
+    Scan scan = new Scan(row4);
+    scan.setReversed(true);
+    scan.setBatch(10);
+    InternalScanner scanner = region.getScanner(scan);
+    List<Cell> currRow = new ArrayList<>();
+    boolean hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), row4, 0, row4.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), row3, 0, row3.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), row2, 0, row2.length));
+    assertTrue(hasNext);
+    currRow.clear();
+    hasNext = scanner.next(currRow);
+    assertEquals(1, currRow.size());
+    assertTrue(Bytes.equals(currRow.get(0).getRowArray(), currRow.get(0).getRowOffset(), currRow
+        .get(0).getRowLength(), row1, 0, row1.length));
+    assertFalse(hasNext);
   }
 
   /**
@@ -5687,51 +5441,46 @@ public class TestHRegion {
     byte[] col = Bytes.toBytes("C");
     HBaseConfiguration conf = new HBaseConfiguration();
     this.region = initHRegion(tableName, method, conf, families);
-    try {
-      // setup with one storefile and one memstore, to create scanner and get an earlier readPt
-      Put put = new Put(Bytes.toBytes("19998"));
-      put.addColumn(cf1, col, Bytes.toBytes("val"));
-      region.put(put);
-      region.flushcache(true, true, FlushLifeCycleTracker.DUMMY);
-      Put put2 = new Put(Bytes.toBytes("19997"));
-      put2.addColumn(cf1, col, Bytes.toBytes("val"));
-      region.put(put2);
+    // setup with one storefile and one memstore, to create scanner and get an earlier readPt
+    Put put = new Put(Bytes.toBytes("19998"));
+    put.addColumn(cf1, col, Bytes.toBytes("val"));
+    region.put(put);
+    region.flushcache(true, true, FlushLifeCycleTracker.DUMMY);
+    Put put2 = new Put(Bytes.toBytes("19997"));
+    put2.addColumn(cf1, col, Bytes.toBytes("val"));
+    region.put(put2);
 
-      Scan scan = new Scan(Bytes.toBytes("19998"));
-      scan.setReversed(true);
-      InternalScanner scanner = region.getScanner(scan);
+    Scan scan = new Scan(Bytes.toBytes("19998"));
+    scan.setReversed(true);
+    InternalScanner scanner = region.getScanner(scan);
 
-      // create one storefile contains many rows will be skipped
-      // to check StoreFileScanner.seekToPreviousRow
-      for (int i = 10000; i < 20000; i++) {
-        Put p = new Put(Bytes.toBytes(""+i));
-        p.addColumn(cf1, col, Bytes.toBytes("" + i));
-        region.put(p);
-      }
-      region.flushcache(true, true, FlushLifeCycleTracker.DUMMY);
-
-      // create one memstore contains many rows will be skipped
-      // to check MemStoreScanner.seekToPreviousRow
-      for (int i = 10000; i < 20000; i++) {
-        Put p = new Put(Bytes.toBytes(""+i));
-        p.addColumn(cf1, col, Bytes.toBytes("" + i));
-        region.put(p);
-      }
-
-      List<Cell> currRow = new ArrayList<>();
-      boolean hasNext;
-      do {
-        hasNext = scanner.next(currRow);
-      } while (hasNext);
-      assertEquals(2, currRow.size());
-      assertEquals("19998", Bytes.toString(currRow.get(0).getRowArray(),
-        currRow.get(0).getRowOffset(), currRow.get(0).getRowLength()));
-      assertEquals("19997", Bytes.toString(currRow.get(1).getRowArray(),
-        currRow.get(1).getRowOffset(), currRow.get(1).getRowLength()));
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // create one storefile contains many rows will be skipped
+    // to check StoreFileScanner.seekToPreviousRow
+    for (int i = 10000; i < 20000; i++) {
+      Put p = new Put(Bytes.toBytes(""+i));
+      p.addColumn(cf1, col, Bytes.toBytes("" + i));
+      region.put(p);
     }
+    region.flushcache(true, true, FlushLifeCycleTracker.DUMMY);
+
+    // create one memstore contains many rows will be skipped
+    // to check MemStoreScanner.seekToPreviousRow
+    for (int i = 10000; i < 20000; i++) {
+      Put p = new Put(Bytes.toBytes(""+i));
+      p.addColumn(cf1, col, Bytes.toBytes("" + i));
+      region.put(p);
+    }
+
+    List<Cell> currRow = new ArrayList<>();
+    boolean hasNext;
+    do {
+      hasNext = scanner.next(currRow);
+    } while (hasNext);
+    assertEquals(2, currRow.size());
+    assertEquals("19998", Bytes.toString(currRow.get(0).getRowArray(),
+      currRow.get(0).getRowOffset(), currRow.get(0).getRowLength()));
+    assertEquals("19997", Bytes.toString(currRow.get(1).getRowArray(),
+      currRow.get(1).getRowOffset(), currRow.get(1).getRowLength()));
   }
 
   @Test
@@ -5741,54 +5490,89 @@ public class TestHRegion {
     byte[] col = Bytes.toBytes("C");
     HBaseConfiguration conf = new HBaseConfiguration();
     this.region = initHRegion(tableName, method, conf, families);
-    try {
-      // setup with one storefile and one memstore, to create scanner and get an earlier readPt
-      Put put = new Put(Bytes.toBytes("19996"));
-      put.addColumn(cf1, col, Bytes.toBytes("val"));
-      region.put(put);
-      Put put2 = new Put(Bytes.toBytes("19995"));
-      put2.addColumn(cf1, col, Bytes.toBytes("val"));
-      region.put(put2);
-      // create a reverse scan
-      Scan scan = new Scan(Bytes.toBytes("19996"));
-      scan.setReversed(true);
-      RegionScannerImpl scanner = region.getScanner(scan);
+    // setup with one storefile and one memstore, to create scanner and get an earlier readPt
+    Put put = new Put(Bytes.toBytes("19996"));
+    put.addColumn(cf1, col, Bytes.toBytes("val"));
+    region.put(put);
+    Put put2 = new Put(Bytes.toBytes("19995"));
+    put2.addColumn(cf1, col, Bytes.toBytes("val"));
+    region.put(put2);
+    // create a reverse scan
+    Scan scan = new Scan(Bytes.toBytes("19996"));
+    scan.setReversed(true);
+    RegionScannerImpl scanner = region.getScanner(scan);
 
-      // flush the cache. This will reset the store scanner
-      region.flushcache(true, true, FlushLifeCycleTracker.DUMMY);
+    // flush the cache. This will reset the store scanner
+    region.flushcache(true, true, FlushLifeCycleTracker.DUMMY);
 
-      // create one memstore contains many rows will be skipped
-      // to check MemStoreScanner.seekToPreviousRow
-      for (int i = 10000; i < 20000; i++) {
-        Put p = new Put(Bytes.toBytes("" + i));
-        p.addColumn(cf1, col, Bytes.toBytes("" + i));
-        region.put(p);
-      }
-      List<Cell> currRow = new ArrayList<>();
-      boolean hasNext;
-      boolean assertDone = false;
-      do {
-        hasNext = scanner.next(currRow);
-        // With HBASE-15871, after the scanner is reset the memstore scanner should not be
-        // added here
-        if (!assertDone) {
-          StoreScanner current =
-              (StoreScanner) (scanner.storeHeap).getCurrentForTesting();
-          List<KeyValueScanner> scanners = current.getAllScannersForTesting();
-          assertEquals("There should be only one scanner the store file scanner", 1,
-            scanners.size());
-          assertDone = true;
-        }
-      } while (hasNext);
-      assertEquals(2, currRow.size());
-      assertEquals("19996", Bytes.toString(currRow.get(0).getRowArray(),
-        currRow.get(0).getRowOffset(), currRow.get(0).getRowLength()));
-      assertEquals("19995", Bytes.toString(currRow.get(1).getRowArray(),
-        currRow.get(1).getRowOffset(), currRow.get(1).getRowLength()));
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
+    // create one memstore contains many rows will be skipped
+    // to check MemStoreScanner.seekToPreviousRow
+    for (int i = 10000; i < 20000; i++) {
+      Put p = new Put(Bytes.toBytes("" + i));
+      p.addColumn(cf1, col, Bytes.toBytes("" + i));
+      region.put(p);
     }
+    List<Cell> currRow = new ArrayList<>();
+    boolean hasNext;
+    boolean assertDone = false;
+    do {
+      hasNext = scanner.next(currRow);
+      // With HBASE-15871, after the scanner is reset the memstore scanner should not be
+      // added here
+      if (!assertDone) {
+        StoreScanner current =
+            (StoreScanner) (scanner.storeHeap).getCurrentForTesting();
+        List<KeyValueScanner> scanners = current.getAllScannersForTesting();
+        assertEquals("There should be only one scanner the store file scanner", 1,
+          scanners.size());
+        assertDone = true;
+      }
+    } while (hasNext);
+    assertEquals(2, currRow.size());
+    assertEquals("19996", Bytes.toString(currRow.get(0).getRowArray(),
+      currRow.get(0).getRowOffset(), currRow.get(0).getRowLength()));
+    assertEquals("19995", Bytes.toString(currRow.get(1).getRowArray(),
+      currRow.get(1).getRowOffset(), currRow.get(1).getRowLength()));
+  }
+
+  @Test
+  public void testReverseScanWhenPutCellsAfterOpenReverseScan() throws Exception {
+    byte[] cf1 = Bytes.toBytes("CF1");
+    byte[][] families = { cf1 };
+    byte[] col = Bytes.toBytes("C");
+
+    HBaseConfiguration conf = new HBaseConfiguration();
+    this.region = initHRegion(tableName, method, conf, families);
+
+    Put put = new Put(Bytes.toBytes("199996"));
+    put.addColumn(cf1, col, Bytes.toBytes("val"));
+    region.put(put);
+    Put put2 = new Put(Bytes.toBytes("199995"));
+    put2.addColumn(cf1, col, Bytes.toBytes("val"));
+    region.put(put2);
+
+    // Create a reverse scan
+    Scan scan = new Scan(Bytes.toBytes("199996"));
+    scan.setReversed(true);
+    RegionScannerImpl scanner = region.getScanner(scan);
+
+    // Put a lot of cells that have sequenceIDs grater than the readPt of the reverse scan
+    for (int i = 100000; i < 200000; i++) {
+      Put p = new Put(Bytes.toBytes("" + i));
+      p.addColumn(cf1, col, Bytes.toBytes("" + i));
+      region.put(p);
+    }
+    List<Cell> currRow = new ArrayList<>();
+    boolean hasNext;
+    do {
+      hasNext = scanner.next(currRow);
+    } while (hasNext);
+
+    assertEquals(2, currRow.size());
+    assertEquals("199996", Bytes.toString(currRow.get(0).getRowArray(),
+      currRow.get(0).getRowOffset(), currRow.get(0).getRowLength()));
+    assertEquals("199995", Bytes.toString(currRow.get(1).getRowArray(),
+      currRow.get(1).getRowOffset(), currRow.get(1).getRowLength()));
   }
 
   @Test
@@ -5812,9 +5596,6 @@ public class TestHRegion {
 
     region.delete(new Delete(row));
     Assert.assertEquals(4L, region.getWriteRequestsCount());
-
-    HBaseTestingUtility.closeRegionAndWAL(this.region);
-    this.region = null;
   }
 
   @Test
@@ -5830,7 +5611,7 @@ public class TestHRegion {
       HConstants.EMPTY_BYTE_ARRAY, HConstants.EMPTY_BYTE_ARRAY);
 
     // open the region w/o rss and wal and flush some files
-    HRegion region =
+    region =
          HBaseTestingUtility.createRegionAndWAL(hri, TEST_UTIL.getDataTestDir(), TEST_UTIL
              .getConfiguration(), htd);
     assertNotNull(region);
@@ -5846,44 +5627,39 @@ public class TestHRegion {
     WAL wal = mockWAL();
     when(rss.getWAL((HRegionInfo) any())).thenReturn(wal);
 
-    try {
-      region = HRegion.openHRegion(hri, htd, rss.getWAL(hri),
-        TEST_UTIL.getConfiguration(), rss, null);
+    region = HRegion.openHRegion(hri, htd, rss.getWAL(hri),
+      TEST_UTIL.getConfiguration(), rss, null);
 
-      verify(wal, times(1)).append((HRegionInfo)any(), (WALKeyImpl)any()
-        , editCaptor.capture(), anyBoolean());
+    verify(wal, times(1)).append((HRegionInfo)any(), (WALKeyImpl)any()
+      , editCaptor.capture(), anyBoolean());
 
-      WALEdit edit = editCaptor.getValue();
-      assertNotNull(edit);
-      assertNotNull(edit.getCells());
-      assertEquals(1, edit.getCells().size());
-      RegionEventDescriptor desc = WALEdit.getRegionEventDescriptor(edit.getCells().get(0));
-      assertNotNull(desc);
+    WALEdit edit = editCaptor.getValue();
+    assertNotNull(edit);
+    assertNotNull(edit.getCells());
+    assertEquals(1, edit.getCells().size());
+    RegionEventDescriptor desc = WALEdit.getRegionEventDescriptor(edit.getCells().get(0));
+    assertNotNull(desc);
 
-      LOG.info("RegionEventDescriptor from WAL: " + desc);
+    LOG.info("RegionEventDescriptor from WAL: " + desc);
 
-      assertEquals(RegionEventDescriptor.EventType.REGION_OPEN, desc.getEventType());
-      assertTrue(Bytes.equals(desc.getTableName().toByteArray(), htd.getTableName().toBytes()));
-      assertTrue(Bytes.equals(desc.getEncodedRegionName().toByteArray(),
-        hri.getEncodedNameAsBytes()));
-      assertTrue(desc.getLogSequenceNumber() > 0);
-      assertEquals(serverName, ProtobufUtil.toServerName(desc.getServer()));
-      assertEquals(2, desc.getStoresCount());
+    assertEquals(RegionEventDescriptor.EventType.REGION_OPEN, desc.getEventType());
+    assertTrue(Bytes.equals(desc.getTableName().toByteArray(), htd.getTableName().toBytes()));
+    assertTrue(Bytes.equals(desc.getEncodedRegionName().toByteArray(),
+      hri.getEncodedNameAsBytes()));
+    assertTrue(desc.getLogSequenceNumber() > 0);
+    assertEquals(serverName, ProtobufUtil.toServerName(desc.getServer()));
+    assertEquals(2, desc.getStoresCount());
 
-      StoreDescriptor store = desc.getStores(0);
-      assertTrue(Bytes.equals(store.getFamilyName().toByteArray(), fam1));
-      assertEquals(store.getStoreHomeDir(), Bytes.toString(fam1));
-      assertEquals(1, store.getStoreFileCount()); // 1store file
-      assertFalse(store.getStoreFile(0).contains("/")); // ensure path is relative
+    StoreDescriptor store = desc.getStores(0);
+    assertTrue(Bytes.equals(store.getFamilyName().toByteArray(), fam1));
+    assertEquals(store.getStoreHomeDir(), Bytes.toString(fam1));
+    assertEquals(1, store.getStoreFileCount()); // 1store file
+    assertFalse(store.getStoreFile(0).contains("/")); // ensure path is relative
 
-      store = desc.getStores(1);
-      assertTrue(Bytes.equals(store.getFamilyName().toByteArray(), fam2));
-      assertEquals(store.getStoreHomeDir(), Bytes.toString(fam2));
-      assertEquals(0, store.getStoreFileCount()); // no store files
-
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(region);
-    }
+    store = desc.getStores(1);
+    assertTrue(Bytes.equals(store.getFamilyName().toByteArray(), fam2));
+    assertEquals(store.getStoreHomeDir(), Bytes.toString(fam2));
+    assertEquals(0, store.getStoreFileCount()); // no store files
   }
 
   // Helper for test testOpenRegionWrittenToWALForLogReplay
@@ -5922,7 +5698,7 @@ public class TestHRegion {
   /**
    * Utility method to setup a WAL mock.
    * Needs to do the bit where we close latch on the WALKeyImpl on append else test hangs.
-   * @return
+   * @return a mock WAL
    * @throws IOException
    */
   private WAL mockWAL() throws IOException {
@@ -6075,117 +5851,112 @@ public class TestHRegion {
     Configuration conf = new Configuration(TEST_UTIL.getConfiguration());
     conf.setInt(HFile.FORMAT_VERSION_KEY, HFile.MIN_FORMAT_VERSION_WITH_TAGS);
 
-    HRegion region = HBaseTestingUtility.createRegionAndWAL(new HRegionInfo(htd.getTableName(),
+    region = HBaseTestingUtility.createRegionAndWAL(new HRegionInfo(htd.getTableName(),
             HConstants.EMPTY_BYTE_ARRAY, HConstants.EMPTY_BYTE_ARRAY),
         TEST_UTIL.getDataTestDir(), conf, htd);
     assertNotNull(region);
-    try {
-      long now = EnvironmentEdgeManager.currentTime();
-      // Add a cell that will expire in 5 seconds via cell TTL
-      region.put(new Put(row).add(new KeyValue(row, fam1, q1, now,
-        HConstants.EMPTY_BYTE_ARRAY, new ArrayBackedTag[] {
-          // TTL tags specify ts in milliseconds
-          new ArrayBackedTag(TagType.TTL_TAG_TYPE, Bytes.toBytes(5000L)) } )));
-      // Add a cell that will expire after 10 seconds via family setting
-      region.put(new Put(row).addColumn(fam1, q2, now, HConstants.EMPTY_BYTE_ARRAY));
-      // Add a cell that will expire in 15 seconds via cell TTL
-      region.put(new Put(row).add(new KeyValue(row, fam1, q3, now + 10000 - 1,
-        HConstants.EMPTY_BYTE_ARRAY, new ArrayBackedTag[] {
-          // TTL tags specify ts in milliseconds
-          new ArrayBackedTag(TagType.TTL_TAG_TYPE, Bytes.toBytes(5000L)) } )));
-      // Add a cell that will expire in 20 seconds via family setting
-      region.put(new Put(row).addColumn(fam1, q4, now + 10000 - 1, HConstants.EMPTY_BYTE_ARRAY));
+    long now = EnvironmentEdgeManager.currentTime();
+    // Add a cell that will expire in 5 seconds via cell TTL
+    region.put(new Put(row).add(new KeyValue(row, fam1, q1, now,
+      HConstants.EMPTY_BYTE_ARRAY, new ArrayBackedTag[] {
+        // TTL tags specify ts in milliseconds
+        new ArrayBackedTag(TagType.TTL_TAG_TYPE, Bytes.toBytes(5000L)) })));
+    // Add a cell that will expire after 10 seconds via family setting
+    region.put(new Put(row).addColumn(fam1, q2, now, HConstants.EMPTY_BYTE_ARRAY));
+    // Add a cell that will expire in 15 seconds via cell TTL
+    region.put(new Put(row).add(new KeyValue(row, fam1, q3, now + 10000 - 1,
+      HConstants.EMPTY_BYTE_ARRAY, new ArrayBackedTag[] {
+        // TTL tags specify ts in milliseconds
+        new ArrayBackedTag(TagType.TTL_TAG_TYPE, Bytes.toBytes(5000L)) })));
+    // Add a cell that will expire in 20 seconds via family setting
+    region.put(new Put(row).addColumn(fam1, q4, now + 10000 - 1, HConstants.EMPTY_BYTE_ARRAY));
 
-      // Flush so we are sure store scanning gets this right
-      region.flush(true);
+    // Flush so we are sure store scanning gets this right
+    region.flush(true);
 
-      // A query at time T+0 should return all cells
-      Result r = region.get(new Get(row));
-      assertNotNull(r.getValue(fam1, q1));
-      assertNotNull(r.getValue(fam1, q2));
-      assertNotNull(r.getValue(fam1, q3));
-      assertNotNull(r.getValue(fam1, q4));
+    // A query at time T+0 should return all cells
+    Result r = region.get(new Get(row));
+    assertNotNull(r.getValue(fam1, q1));
+    assertNotNull(r.getValue(fam1, q2));
+    assertNotNull(r.getValue(fam1, q3));
+    assertNotNull(r.getValue(fam1, q4));
 
-      // Increment time to T+5 seconds
-      edge.incrementTime(5000);
+    // Increment time to T+5 seconds
+    edge.incrementTime(5000);
 
-      r = region.get(new Get(row));
-      assertNull(r.getValue(fam1, q1));
-      assertNotNull(r.getValue(fam1, q2));
-      assertNotNull(r.getValue(fam1, q3));
-      assertNotNull(r.getValue(fam1, q4));
+    r = region.get(new Get(row));
+    assertNull(r.getValue(fam1, q1));
+    assertNotNull(r.getValue(fam1, q2));
+    assertNotNull(r.getValue(fam1, q3));
+    assertNotNull(r.getValue(fam1, q4));
 
-      // Increment time to T+10 seconds
-      edge.incrementTime(5000);
+    // Increment time to T+10 seconds
+    edge.incrementTime(5000);
 
-      r = region.get(new Get(row));
-      assertNull(r.getValue(fam1, q1));
-      assertNull(r.getValue(fam1, q2));
-      assertNotNull(r.getValue(fam1, q3));
-      assertNotNull(r.getValue(fam1, q4));
+    r = region.get(new Get(row));
+    assertNull(r.getValue(fam1, q1));
+    assertNull(r.getValue(fam1, q2));
+    assertNotNull(r.getValue(fam1, q3));
+    assertNotNull(r.getValue(fam1, q4));
 
-      // Increment time to T+15 seconds
-      edge.incrementTime(5000);
+    // Increment time to T+15 seconds
+    edge.incrementTime(5000);
 
-      r = region.get(new Get(row));
-      assertNull(r.getValue(fam1, q1));
-      assertNull(r.getValue(fam1, q2));
-      assertNull(r.getValue(fam1, q3));
-      assertNotNull(r.getValue(fam1, q4));
+    r = region.get(new Get(row));
+    assertNull(r.getValue(fam1, q1));
+    assertNull(r.getValue(fam1, q2));
+    assertNull(r.getValue(fam1, q3));
+    assertNotNull(r.getValue(fam1, q4));
 
-      // Increment time to T+20 seconds
-      edge.incrementTime(10000);
+    // Increment time to T+20 seconds
+    edge.incrementTime(10000);
 
-      r = region.get(new Get(row));
-      assertNull(r.getValue(fam1, q1));
-      assertNull(r.getValue(fam1, q2));
-      assertNull(r.getValue(fam1, q3));
-      assertNull(r.getValue(fam1, q4));
+    r = region.get(new Get(row));
+    assertNull(r.getValue(fam1, q1));
+    assertNull(r.getValue(fam1, q2));
+    assertNull(r.getValue(fam1, q3));
+    assertNull(r.getValue(fam1, q4));
 
-      // Fun with disappearing increments
+    // Fun with disappearing increments
 
-      // Start at 1
-      region.put(new Put(row).addColumn(fam1, q1, Bytes.toBytes(1L)));
-      r = region.get(new Get(row));
-      byte[] val = r.getValue(fam1, q1);
-      assertNotNull(val);
-      assertEquals(1L, Bytes.toLong(val));
+    // Start at 1
+    region.put(new Put(row).addColumn(fam1, q1, Bytes.toBytes(1L)));
+    r = region.get(new Get(row));
+    byte[] val = r.getValue(fam1, q1);
+    assertNotNull(val);
+    assertEquals(1L, Bytes.toLong(val));
 
-      // Increment with a TTL of 5 seconds
-      Increment incr = new Increment(row).addColumn(fam1, q1, 1L);
-      incr.setTTL(5000);
-      region.increment(incr); // 2
+    // Increment with a TTL of 5 seconds
+    Increment incr = new Increment(row).addColumn(fam1, q1, 1L);
+    incr.setTTL(5000);
+    region.increment(incr); // 2
 
-      // New value should be 2
-      r = region.get(new Get(row));
-      val = r.getValue(fam1, q1);
-      assertNotNull(val);
-      assertEquals(2L, Bytes.toLong(val));
+    // New value should be 2
+    r = region.get(new Get(row));
+    val = r.getValue(fam1, q1);
+    assertNotNull(val);
+    assertEquals(2L, Bytes.toLong(val));
 
-      // Increment time to T+25 seconds
-      edge.incrementTime(5000);
+    // Increment time to T+25 seconds
+    edge.incrementTime(5000);
 
-      // Value should be back to 1
-      r = region.get(new Get(row));
-      val = r.getValue(fam1, q1);
-      assertNotNull(val);
-      assertEquals(1L, Bytes.toLong(val));
+    // Value should be back to 1
+    r = region.get(new Get(row));
+    val = r.getValue(fam1, q1);
+    assertNotNull(val);
+    assertEquals(1L, Bytes.toLong(val));
 
-      // Increment time to T+30 seconds
-      edge.incrementTime(5000);
+    // Increment time to T+30 seconds
+    edge.incrementTime(5000);
 
-      // Original value written at T+20 should be gone now via family TTL
-      r = region.get(new Get(row));
-      assertNull(r.getValue(fam1, q1));
-
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(region);
-    }
+    // Original value written at T+20 should be gone now via family TTL
+    r = region.get(new Get(row));
+    assertNull(r.getValue(fam1, q1));
   }
 
   @Test
   public void testIncrementTimestampsAreMonotonic() throws IOException {
-    HRegion region = initHRegion(tableName, method, CONF, fam1);
+    region = initHRegion(tableName, method, CONF, fam1);
     ManualEnvironmentEdge edge = new ManualEnvironmentEdge();
     EnvironmentEdgeManager.injectEdge(edge);
 
@@ -6210,7 +5981,7 @@ public class TestHRegion {
 
   @Test
   public void testAppendTimestampsAreMonotonic() throws IOException {
-    HRegion region = initHRegion(tableName, method, CONF, fam1);
+    region = initHRegion(tableName, method, CONF, fam1);
     ManualEnvironmentEdge edge = new ManualEnvironmentEdge();
     EnvironmentEdgeManager.injectEdge(edge);
 
@@ -6241,7 +6012,7 @@ public class TestHRegion {
 
   @Test
   public void testCheckAndMutateTimestampsAreMonotonic() throws IOException {
-    HRegion region = initHRegion(tableName, method, CONF, fam1);
+    region = initHRegion(tableName, method, CONF, fam1);
     ManualEnvironmentEdge edge = new ManualEnvironmentEdge();
     EnvironmentEdgeManager.injectEdge(edge);
 
@@ -6260,7 +6031,7 @@ public class TestHRegion {
     p = new Put(row);
     p.setDurability(Durability.SKIP_WAL);
     p.addColumn(fam1, qual1, qual2);
-    region.checkAndMutate(row, fam1, qual1, CompareOperator.EQUAL, new BinaryComparator(qual1), p, false);
+    region.checkAndMutate(row, fam1, qual1, CompareOperator.EQUAL, new BinaryComparator(qual1), p);
     result = region.get(new Get(row));
     c = result.getColumnLatestCell(fam1, qual1);
     assertEquals(10L, c.getTimestamp());
@@ -6277,7 +6048,7 @@ public class TestHRegion {
 
     int prevLockTimeout = CONF.getInt("hbase.rowlock.wait.duration", 30000);
     CONF.setInt("hbase.rowlock.wait.duration", 1000);
-    final HRegion region = initHRegion(tableName, a, c, method, CONF, false, fam1);
+    region = initHRegion(tableName, a, c, method, CONF, false, fam1);
 
     Mutation[] mutations = new Mutation[] {
         new Put(a)
@@ -6360,7 +6131,7 @@ public class TestHRegion {
 
   @Test
   public void testCheckAndRowMutateTimestampsAreMonotonic() throws IOException {
-    HRegion region = initHRegion(tableName, method, CONF, fam1);
+    region = initHRegion(tableName, method, CONF, fam1);
     ManualEnvironmentEdge edge = new ManualEnvironmentEdge();
     EnvironmentEdgeManager.injectEdge(edge);
 
@@ -6481,15 +6252,31 @@ public class TestHRegion {
     rm.add(put);
 
     this.region = initHRegion(tableName, method, CONF, fam1);
-    try {
-      long wrcBeforeMutate = this.region.writeRequestsCount.longValue();
-      this.region.mutateRow(rm);
-      long wrcAfterMutate = this.region.writeRequestsCount.longValue();
-      Assert.assertEquals(wrcBeforeMutate + rm.getMutations().size(), wrcAfterMutate);
-    } finally {
-      HBaseTestingUtility.closeRegionAndWAL(this.region);
-      this.region = null;
-    }
+    long wrcBeforeMutate = this.region.writeRequestsCount.longValue();
+    this.region.mutateRow(rm);
+    long wrcAfterMutate = this.region.writeRequestsCount.longValue();
+    Assert.assertEquals(wrcBeforeMutate + rm.getMutations().size(), wrcAfterMutate);
+  }
+
+  @Test
+  public void testBulkLoadReplicationEnabled() throws IOException {
+    TEST_UTIL.getConfiguration().setBoolean(HConstants.REPLICATION_BULKLOAD_ENABLE_KEY, true);
+    final ServerName serverName = ServerName.valueOf(name.getMethodName(), 100, 42);
+    final RegionServerServices rss = spy(TEST_UTIL.createMockRegionServerService(serverName));
+
+    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
+    htd.addFamily(new HColumnDescriptor(fam1));
+    HRegionInfo hri = new HRegionInfo(htd.getTableName(),
+        HConstants.EMPTY_BYTE_ARRAY, HConstants.EMPTY_BYTE_ARRAY);
+    region = HRegion.openHRegion(hri, htd, rss.getWAL(hri), TEST_UTIL.getConfiguration(),
+        rss, null);
+
+    assertTrue(region.conf.getBoolean(HConstants.REPLICATION_BULKLOAD_ENABLE_KEY, false));
+    String plugins = region.conf.get(CoprocessorHost.REGION_COPROCESSOR_CONF_KEY, "");
+    String replicationCoprocessorClass = ReplicationObserver.class.getCanonicalName();
+    assertTrue(plugins.contains(replicationCoprocessorClass));
+    assertTrue(region.getCoprocessorHost().
+        getCoprocessors().contains(ReplicationObserver.class.getSimpleName()));
   }
 
   /**
@@ -6516,17 +6303,17 @@ public class TestHRegion {
      * @return If Mob is enabled, return HMobStore, otherwise return HStoreForTesting.
      */
     @Override
-    protected HStore instantiateHStore(final ColumnFamilyDescriptor family) throws IOException {
+    protected HStore instantiateHStore(final ColumnFamilyDescriptor family, boolean warmup)
+        throws IOException {
       if (family.isMobEnabled()) {
         if (HFile.getFormatVersion(this.conf) < HFile.MIN_FORMAT_VERSION_WITH_TAGS) {
-          throw new IOException("A minimum HFile version of "
-              + HFile.MIN_FORMAT_VERSION_WITH_TAGS
-              + " is required for MOB feature. Consider setting " + HFile.FORMAT_VERSION_KEY
-              + " accordingly.");
+          throw new IOException("A minimum HFile version of " + HFile.MIN_FORMAT_VERSION_WITH_TAGS +
+              " is required for MOB feature. Consider setting " + HFile.FORMAT_VERSION_KEY +
+              " accordingly.");
         }
-        return new HMobStore(this, family, this.conf);
+        return new HMobStore(this, family, this.conf, warmup);
       }
-      return new HStoreForTesting(this, family, this.conf);
+      return new HStoreForTesting(this, family, this.conf, warmup);
     }
   }
 
@@ -6542,8 +6329,8 @@ public class TestHRegion {
 
     protected HStoreForTesting(final HRegion region,
         final ColumnFamilyDescriptor family,
-        final Configuration confParam) throws IOException {
-      super(region, family, confParam);
+        final Configuration confParam, boolean warmup) throws IOException {
+      super(region, family, confParam, warmup);
     }
 
     @Override

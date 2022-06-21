@@ -18,6 +18,7 @@
 package org.apache.hadoop.hbase.io.hfile;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -33,15 +34,21 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.*;
+import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
+import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HFileProtos;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.Before;
 import org.junit.ClassRule;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
@@ -79,6 +86,9 @@ public class TestFixedFileTrailer {
     this.version = version;
   }
 
+  @Rule
+  public ExpectedException expectedEx = ExpectedException.none();
+
   @Parameters
   public static Collection<Object[]> getParameters() {
     List<Object[]> versionsToTest = new ArrayList<>();
@@ -90,6 +100,47 @@ public class TestFixedFileTrailer {
   @Before
   public void setUp() throws IOException {
     fs = FileSystem.get(util.getConfiguration());
+  }
+
+  @Test
+  public void testComparatorIsHBase1Compatible() {
+    FixedFileTrailer t = new FixedFileTrailer(version, HFileReaderImpl.PBUF_TRAILER_MINOR_VERSION);
+    t.setComparatorClass(CellComparatorImpl.COMPARATOR.getClass());
+    assertEquals(CellComparatorImpl.COMPARATOR.getClass().getName(), t.getComparatorClassName());
+    HFileProtos.FileTrailerProto pb = t.toProtobuf();
+    assertEquals(KeyValue.COMPARATOR.getClass().getName(), pb.getComparatorClassName());
+    t.setComparatorClass(CellComparatorImpl.MetaCellComparator.META_COMPARATOR.getClass());
+    pb = t.toProtobuf();
+    assertEquals(KeyValue.META_COMPARATOR.getClass().getName(),
+        pb.getComparatorClassName());
+  }
+
+  @Test
+  public void testCreateComparator() throws IOException {
+    FixedFileTrailer t = new FixedFileTrailer(version, HFileReaderImpl.PBUF_TRAILER_MINOR_VERSION);
+    try {
+      assertEquals(CellComparatorImpl.class,
+          t.createComparator(KeyValue.COMPARATOR.getLegacyKeyComparatorName()).getClass());
+      assertEquals(CellComparatorImpl.class,
+          t.createComparator(KeyValue.COMPARATOR.getClass().getName()).getClass());
+      assertEquals(CellComparatorImpl.class,
+          t.createComparator(CellComparator.class.getName()).getClass());
+      assertEquals(CellComparatorImpl.MetaCellComparator.class,
+          t.createComparator(KeyValue.META_COMPARATOR.getLegacyKeyComparatorName()).getClass());
+      assertEquals(CellComparatorImpl.MetaCellComparator.class,
+          t.createComparator(KeyValue.META_COMPARATOR.getClass().getName()).getClass());
+      assertEquals(CellComparatorImpl.MetaCellComparator.class, t.createComparator(
+          CellComparatorImpl.MetaCellComparator.META_COMPARATOR.getClass().getName()).getClass());
+      assertNull(t.createComparator(Bytes.BYTES_RAWCOMPARATOR.getClass().getName()));
+      assertNull(t.createComparator("org.apache.hadoop.hbase.KeyValue$RawBytesComparator"));
+    } catch (IOException e) {
+      fail("Unexpected exception while testing FixedFileTrailer#createComparator()");
+    }
+
+    // Test an invalid comparatorClassName
+    expectedEx.expect(IOException.class);
+    t.createComparator("");
+
   }
 
   @Test

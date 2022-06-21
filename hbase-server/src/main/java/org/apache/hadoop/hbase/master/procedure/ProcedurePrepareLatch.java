@@ -57,6 +57,20 @@ public abstract class ProcedurePrepareLatch {
     return hasProcedureSupport(major, minor) ? noopLatch : new CompatibilityLatch();
   }
 
+  /**
+   * Creates a latch which blocks.
+   */
+  public static ProcedurePrepareLatch createBlockingLatch() {
+    return new CompatibilityLatch();
+  }
+
+  /**
+   * Returns the singleton latch which does nothing.
+   */
+  public static ProcedurePrepareLatch getNoopLatch() {
+    return noopLatch;
+  }
+
   private static boolean hasProcedureSupport(int major, int minor) {
     return VersionInfoUtil.currentClientHasMinimumVersion(major, minor);
   }
@@ -64,7 +78,7 @@ public abstract class ProcedurePrepareLatch {
   protected abstract void countDown(final Procedure proc);
   public abstract void await() throws IOException;
 
-  protected static void releaseLatch(final ProcedurePrepareLatch latch, final Procedure proc) {
+  public static void releaseLatch(final ProcedurePrepareLatch latch, final Procedure proc) {
     if (latch != null) {
       latch.countDown(proc);
     }
@@ -85,7 +99,7 @@ public abstract class ProcedurePrepareLatch {
     @Override
     protected void countDown(final Procedure proc) {
       if (proc.hasException()) {
-        exception = proc.getException().unwrapRemoteIOException();
+        exception = MasterProcedureUtil.unwrapRemoteIOException(proc);
       }
       latch.countDown();
     }

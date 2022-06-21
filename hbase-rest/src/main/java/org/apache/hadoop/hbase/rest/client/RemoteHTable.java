@@ -115,13 +115,16 @@ public class RemoteHTable implements Table {
           Iterator ii = quals.iterator();
           while (ii.hasNext()) {
             sb.append(toURLEncodedBytes((byte[])e.getKey()));
-            sb.append(':');
             Object o = ii.next();
             // Puts use byte[] but Deletes use KeyValue
             if (o instanceof byte[]) {
-              sb.append(toURLEncodedBytes((byte[])o));
+              sb.append(':');
+              sb.append(toURLEncodedBytes((byte[]) o));
             } else if (o instanceof KeyValue) {
-              sb.append(toURLEncodedBytes(CellUtil.cloneQualifier((KeyValue)o)));
+              if (((KeyValue) o).getQualifierLength() != 0) {
+                sb.append(':');
+                sb.append(toURLEncodedBytes(CellUtil.cloneQualifier((KeyValue) o)));
+              }
             } else {
               throw new RuntimeException("object type not handled");
             }
@@ -201,7 +204,7 @@ public class RemoteHTable implements Table {
 
   protected CellSetModel buildModelFromPut(Put put) {
     RowModel row = new RowModel(put.getRow());
-    long ts = put.getTimeStamp();
+    long ts = put.getTimestamp();
     for (List<Cell> cells: put.getFamilyCellMap().values()) {
       for (Cell cell: cells) {
         row.addCell(new CellModel(CellUtil.cloneFamily(cell), CellUtil.cloneQualifier(cell),
@@ -468,7 +471,7 @@ public class RemoteHTable implements Table {
   @Override
   public void delete(Delete delete) throws IOException {
     String spec = buildRowSpec(delete.getRow(), delete.getFamilyCellMap(),
-      delete.getTimeStamp(), delete.getTimeStamp(), 1);
+      delete.getTimestamp(), delete.getTimestamp(), 1);
     for (int i = 0; i < maxRetries; i++) {
       Response response = client.delete(spec);
       int code = response.getCode();
@@ -973,6 +976,11 @@ public class RemoteHTable implements Table {
       this.qualifier = Preconditions.checkNotNull(qualifier, "qualifier is null. Consider using" +
           " an empty byte array, or just do not call this method if you want a null qualifier");
       return this;
+    }
+
+    @Override
+    public CheckAndMutateBuilder timeRange(TimeRange timeRange) {
+      throw new UnsupportedOperationException("timeRange not implemented");
     }
 
     @Override

@@ -46,7 +46,7 @@
   long millisFromLastRoll = walStore.getMillisFromLastRoll();
   ArrayList<ProcedureWALFile> procedureWALFiles = walStore.getActiveLogs();
   Set<ProcedureWALFile> corruptedWALFiles = walStore.getCorruptedLogs();
-  List<Procedure<?>> procedures = procExecutor.getProcedures();
+  List<Procedure<MasterProcedureEnv>> procedures = procExecutor.getProcedures();
   Collections.sort(procedures, new Comparator<Procedure>() {
     @Override
     public int compare(Procedure lhs, Procedure rhs) {
@@ -85,7 +85,7 @@
       <tr>
         <td><%= proc.getProcId() %></td>
         <td><%= proc.hasParent() ? proc.getParentProcId() : "" %></td>
-        <td><%= escapeXml(proc.getState().toString()) %></td>
+        <td><%= escapeXml(proc.getState().toString() + (proc.isBypass() ? "(Bypass)" : "")) %></td>
         <td><%= proc.hasOwner() ? escapeXml(proc.getOwner()) : "" %></td>
         <td><%= escapeXml(proc.getProcName()) %></td>
         <td><%= new Date(proc.getSubmittedTime()) %></td>

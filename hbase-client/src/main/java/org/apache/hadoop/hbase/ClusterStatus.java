@@ -26,6 +26,8 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+
+import org.apache.hadoop.hbase.client.RegionStatesCount;
 import org.apache.hadoop.hbase.master.RegionState;
 import org.apache.yetus.audience.InterfaceAudience;
 
@@ -345,6 +347,16 @@ public class ClusterStatus implements ClusterMetrics {
   }
 
   @Override
+  public List<ServerName> getServersName() {
+    return metrics.getServersName();
+  }
+
+  @Override
+  public Map<TableName, RegionStatesCount> getTableRegionStatesCount() {
+    return metrics.getTableRegionStatesCount();
+  }
+
+  @Override
   public String toString() {
     StringBuilder sb = new StringBuilder(1024);
     sb.append("Master: " + metrics.getMasterName());
@@ -358,9 +370,15 @@ public class ClusterStatus implements ClusterMetrics {
     }
 
     int serversSize = getServersSize();
-    sb.append("\nNumber of live region servers: " + serversSize);
+    int serversNameSize = getServersName().size();
+    sb.append("\nNumber of live region servers: "
+        + (serversSize > 0 ? serversSize : serversNameSize));
     if (serversSize > 0) {
       for (ServerName serverName : metrics.getLiveServerMetrics().keySet()) {
+        sb.append("\n  " + serverName.getServerName());
+      }
+    } else if (serversNameSize > 0) {
+      for (ServerName serverName : getServersName()) {
         sb.append("\n  " + serverName.getServerName());
       }
     }

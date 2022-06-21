@@ -59,6 +59,7 @@ import org.apache.hadoop.hbase.HadoopShims;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.PerformanceEvaluation;
 import org.apache.hadoop.hbase.PrivateCellUtil;
+import org.apache.hadoop.hbase.StartMiniClusterOption;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Tag;
 import org.apache.hadoop.hbase.TagType;
@@ -607,7 +608,9 @@ public class TestHFileOutputFormat2  {
     for (int i = 0; i < hostCount; ++i) {
       hostnames[i] = "datanode_" + i;
     }
-    util.startMiniCluster(1, hostCount, hostnames);
+    StartMiniClusterOption option = StartMiniClusterOption.builder()
+        .numRegionServers(hostCount).dataNodeHosts(hostnames).build();
+    util.startMiniCluster(option);
 
     Map<String, Table> allTables = new HashMap<>(tableStr.size());
     List<HFileOutputFormat2.TableInfo> tableInfo = new ArrayList<>(tableStr.size());
@@ -787,9 +790,8 @@ public class TestHFileOutputFormat2  {
   }
 
   /**
-   * Test for {@link HFileOutputFormat2#configureCompression(Configuration, HTableDescriptor)} and
-   * {@link HFileOutputFormat2#createFamilyCompressionMap(Configuration)}.
-   * Tests that the compression map is correctly serialized into
+   * Test for {@link HFileOutputFormat2#createFamilyCompressionMap(Configuration)}.
+   * Tests that the family compression map is correctly serialized into
    * and deserialized from configuration
    *
    * @throws IOException
@@ -859,9 +861,8 @@ public class TestHFileOutputFormat2  {
 
 
   /**
-   * Test for {@link HFileOutputFormat2#configureBloomType(HTableDescriptor, Configuration)} and
-   * {@link HFileOutputFormat2#createFamilyBloomTypeMap(Configuration)}.
-   * Tests that the compression map is correctly serialized into
+   * Test for {@link HFileOutputFormat2#createFamilyBloomTypeMap(Configuration)}.
+   * Tests that the family bloom type map is correctly serialized into
    * and deserialized from configuration
    *
    * @throws IOException
@@ -930,9 +931,8 @@ public class TestHFileOutputFormat2  {
   }
 
   /**
-   * Test for {@link HFileOutputFormat2#configureBlockSize(HTableDescriptor, Configuration)} and
-   * {@link HFileOutputFormat2#createFamilyBlockSizeMap(Configuration)}.
-   * Tests that the compression map is correctly serialized into
+   * Test for {@link HFileOutputFormat2#createFamilyBlockSizeMap(Configuration)}.
+   * Tests that the family block size map is correctly serialized into
    * and deserialized from configuration
    *
    * @throws IOException
@@ -1007,9 +1007,8 @@ public class TestHFileOutputFormat2  {
   }
 
   /**
-   * Test for {@link HFileOutputFormat2#configureDataBlockEncoding(HTableDescriptor, Configuration)}
-   * and {@link HFileOutputFormat2#createFamilyDataBlockEncodingMap(Configuration)}.
-   * Tests that the compression map is correctly serialized into
+   * Test for {@link HFileOutputFormat2#createFamilyDataBlockEncodingMap(Configuration)}.
+   * Tests that the family data block encoding map is correctly serialized into
    * and deserialized from configuration
    *
    * @throws IOException
@@ -1489,6 +1488,48 @@ public class TestHFileOutputFormat2  {
     }
 
     return null;
+  }
+
+  @Test
+  public void TestConfigureCompression() throws Exception {
+    Configuration conf = new Configuration(this.util.getConfiguration());
+    RecordWriter<ImmutableBytesWritable, Cell> writer = null;
+    TaskAttemptContext context = null;
+    Path dir = util.getDataTestDir("TestConfigureCompression");
+    String hfileoutputformatCompression = "gz";
+
+    try {
+      conf.set(HFileOutputFormat2.OUTPUT_TABLE_NAME_CONF_KEY, TABLE_NAMES[0].getNameAsString());
+      conf.setBoolean(HFileOutputFormat2.LOCALITY_SENSITIVE_CONF_KEY, false);
+
+      conf.set(HFileOutputFormat2.COMPRESSION_OVERRIDE_CONF_KEY, hfileoutputformatCompression);
+
+      Job job = Job.getInstance(conf);
+      FileOutputFormat.setOutputPath(job, dir);
+      context = createTestTaskAttemptContext(job);
+      HFileOutputFormat2 hof = new HFileOutputFormat2();
+      writer = hof.getRecordWriter(context);
+      final byte[] b = Bytes.toBytes("b");
+
+      KeyValue kv = new KeyValue(b, b, b, HConstants.LATEST_TIMESTAMP, b);
+      writer.write(new ImmutableBytesWritable(), kv);
+      writer.close(context);
+      writer = null;
+      FileSystem fs = dir.getFileSystem(conf);
+      RemoteIterator<LocatedFileStatus> iterator = fs.listFiles(dir, true);
+      while (iterator.hasNext()) {
+        LocatedFileStatus keyFileStatus = iterator.next();
+        HFile.Reader reader =
+            HFile.createReader(fs, keyFileStatus.getPath(), new CacheConfig(conf), true, conf);
+        assertEquals(reader.getCompressionAlgorithm().getName(), hfileoutputformatCompression);
+      }
+    } finally {
+      if (writer != null && context != null) {
+        writer.close(context);
+      }
+      dir.getFileSystem(conf).delete(dir, true);
+    }
+
   }
 }
 

@@ -29,6 +29,7 @@ import org.apache.hadoop.hbase.util.LoadTestTool;
 import org.apache.hadoop.hbase.util.MultiThreadedUpdater;
 import org.apache.hadoop.hbase.util.MultiThreadedWriter;
 import org.apache.hadoop.hbase.util.ServerRegionReplicaUtil;
+import org.apache.hadoop.hbase.util.TableDescriptorChecker;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.util.test.LoadTestDataGenerator;
 import org.apache.hadoop.util.StringUtils;
@@ -50,7 +51,7 @@ import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
  * with the replication of the edits before read_delay_ms to the given region replica id so that
  * the read and verify will not fail.
  *
- * The job will run for <b>at least<b> given runtime (default 10min) by running a concurrent
+ * The job will run for <b>at least</b> given runtime (default 10min) by running a concurrent
  * writer and reader workload followed by a concurrent updater and reader workload for
  * num_keys_per_server.
  * <p>
@@ -94,7 +95,7 @@ public class IntegrationTestRegionReplicaReplication extends IntegrationTestInge
       String.format("%s.%s", TEST_NAME, LoadTestTool.OPT_COLUMN_FAMILIES),
       StringUtils.join(",", DEFAULT_COLUMN_FAMILIES));
 
-    conf.setBoolean("hbase.table.sanity.checks", true);
+    conf.setBoolean(TableDescriptorChecker.TABLE_SANITY_CHECKS, true);
 
     // enable async wal replication to region replicas for unit tests
     conf.setBoolean(ServerRegionReplicaUtil.REGION_REPLICA_REPLICATION_CONF_KEY, true);

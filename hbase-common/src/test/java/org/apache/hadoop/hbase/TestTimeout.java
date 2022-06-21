@@ -32,7 +32,7 @@ public class TestTimeout {
 
     @Test
     public void run1() throws InterruptedException {
-        Thread.sleep(100);
+      Thread.sleep(100);
     }
 
     /**
@@ -41,6 +41,15 @@ public class TestTimeout {
      */
     @Ignore @Test
     public void infiniteLoop() {
-        while (true) {}
+      // Launch a background non-daemon thread.
+      Thread t = new Thread("HangingThread") {
+        public void run() {
+          synchronized(this) {
+            while(true) {}
+          }
+        }
+      };
+      t.start();
+      while (true) {}
    }
 }

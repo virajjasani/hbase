@@ -18,12 +18,17 @@
  */
 package org.apache.hadoop.hbase.monitoring;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import org.apache.hadoop.hbase.util.GsonUtil;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.yetus.audience.InterfaceAudience;
 
-import java.io.IOException;
-import java.util.HashMap;
-import java.util.Map;
+import org.apache.hbase.thirdparty.com.google.gson.Gson;
 
 @InterfaceAudience.Private
 class MonitoredTaskImpl implements MonitoredTask {
@@ -37,13 +42,45 @@ class MonitoredTaskImpl implements MonitoredTask {
   
   protected volatile State state = State.RUNNING;
 
-  private static final ObjectMapper MAPPER = new ObjectMapper();
+  private boolean journalEnabled = false;
+  private List<StatusJournalEntry> journal;
+
+  private static final Gson GSON = GsonUtil.createGson().create();
 
   public MonitoredTaskImpl() {
     startTime = System.currentTimeMillis();
     statusTime = startTime;
     stateTime = startTime;
     warnTime = startTime;
+  }
+
+  private static class StatusJournalEntryImpl implements StatusJournalEntry {
+    private long statusTime;
+    private String status;
+
+    public StatusJournalEntryImpl(String status, long statusTime) {
+      this.status = status;
+      this.statusTime = statusTime;
+    }
+
+    @Override
+    public String getStatus() {
+      return status;
+    }
+
+    @Override
+    public long getTimeStamp() {
+      return statusTime;
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder();
+      sb.append(status);
+      sb.append(" at ");
+      sb.append(statusTime);
+      return sb.toString();
+    }
   }
 
   @Override
@@ -126,6 +163,9 @@ class MonitoredTaskImpl implements MonitoredTask {
   public void setStatus(String status) {
     this.status = status;
     statusTime = System.currentTimeMillis();
+    if (journalEnabled) {
+      journal.add(new StatusJournalEntryImpl(this.status, statusTime));
+    }
   }
 
   protected void setState(State state) {
@@ -173,7 +213,7 @@ class MonitoredTaskImpl implements MonitoredTask {
 
   @Override
   public String toJSON() throws IOException {
-    return MAPPER.writeValueAsString(toMap());
+    return GSON.toJson(toMap());
   }
 
   @Override
@@ -189,6 +229,49 @@ class MonitoredTaskImpl implements MonitoredTask {
     sb.append(", completionTime=");
     sb.append(getCompletionTimestamp());
     return sb.toString();
+  }
+
+  /**
+   * Returns the status journal. This implementation of status journal is not thread-safe. Currently
+   * we use this to track various stages of flushes and compactions where we can use this/pretty
+   * print for post task analysis, by which time we are already done changing states (writing to
+   * journal)
+   */
+  @Override
+  public List<StatusJournalEntry> getStatusJournal() {
+    if (journal == null) {
+      return Collections.emptyList();
+    } else {
+      return Collections.unmodifiableList(journal);
+    }
+  }
+
+  /**
+   * Enables journaling of this monitored task, the first invocation will lazily initialize the
+   * journal. The journal implementation itself and this method are not thread safe
+   */
+  @Override
+  public void enableStatusJournal(boolean includeCurrentStatus) {
+    if (journalEnabled && journal != null) {
+      return;
+    }
+    journalEnabled = true;
+    if (journal == null) {
+      journal = new ArrayList<StatusJournalEntry>();
+    }
+    if (includeCurrentStatus) {
+      journal.add(new StatusJournalEntryImpl(status, statusTime));
+    }
+  }
+
+  @Override
+  public void disableStatusJournal() {
+    journalEnabled = false;
+  }
+
+  @Override
+  public String prettyPrintJournal() {
+    return StringUtils.join("\n\t", getStatusJournal());
   }
 
 }

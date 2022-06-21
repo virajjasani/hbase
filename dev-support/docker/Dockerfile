@@ -20,19 +20,34 @@
 FROM maven:3.5-jdk-8
 
 RUN apt-get -q update && apt-get -q install --no-install-recommends -y \
+       git \
        bats \
        findbugs \
        libperl-critic-perl \
        pylint \
        python-dateutil \
        rsync \
+       make \
+       gcc \
+       libc6-dev \
        ruby \
-       shellcheck \
+       ruby-dev \
        wget \
        && \
-    gem install rake rubocop ruby-lint
+    gem install --no-document rake rubocop ruby-lint
 
 ENV FINDBUGS_HOME /usr
+
+####
+# Install shellcheck
+###
+RUN mkdir -p /opt/shellcheck && \
+    curl -L -s -S \
+        https://storage.googleapis.com/shellcheck/shellcheck-stable.linux.x86_64.tar.xz \
+        -o /opt/shellcheck.tar.xz && \
+    tar xJf /opt/shellcheck.tar.xz --strip-components 1 -C /opt/shellcheck && \
+    ln -s /opt/shellcheck/shellcheck /usr/bin/shellcheck && \
+    rm -f /opt/shellcheck.tar.xz
 
 ###
 # Avoid out of memory errors in builds

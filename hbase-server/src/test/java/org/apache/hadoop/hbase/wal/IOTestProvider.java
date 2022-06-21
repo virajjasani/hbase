@@ -27,6 +27,8 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -87,18 +89,18 @@ public class IOTestProvider implements WALProvider {
   private volatile FSHLog log;
 
   private String providerId;
+  protected AtomicBoolean initialized = new AtomicBoolean(false);
 
   private List<WALActionsListener> listeners = new ArrayList<>();
   /**
    * @param factory factory that made us, identity used for FS layout. may not be null
    * @param conf may not be null
-   * @param listeners may be null
    * @param providerId differentiate between providers from one facotry, used for FS layout. may be
    *                   null
    */
   @Override
   public void init(WALFactory factory, Configuration conf, String providerId) throws IOException {
-    if (factory != null) {
+    if (!initialized.compareAndSet(false, true)) {
       throw new IllegalStateException("WALProvider.init should only be called once.");
     }
     this.factory = factory;
@@ -210,7 +212,7 @@ public class IOTestProvider implements WALProvider {
         LOG.info("creating new writer instance.");
         final ProtobufLogWriter writer = new IOTestWriter();
         try {
-          writer.init(fs, path, conf, false);
+          writer.init(fs, path, conf, false, this.blocksize);
         } catch (CommonFSUtils.StreamLacksCapabilityException exception) {
           throw new IOException("Can't create writer instance because underlying FileSystem " +
               "doesn't support needed stream capabilities.", exception);
@@ -237,8 +239,8 @@ public class IOTestProvider implements WALProvider {
     private boolean doSyncs;
 
     @Override
-    public void init(FileSystem fs, Path path, Configuration conf, boolean overwritable)
-        throws IOException, CommonFSUtils.StreamLacksCapabilityException {
+    public void init(FileSystem fs, Path path, Configuration conf, boolean overwritable,
+        long blocksize) throws IOException, CommonFSUtils.StreamLacksCapabilityException {
       Collection<String> operations = conf.getStringCollection(ALLOWED_OPERATIONS);
       if (operations.isEmpty() || operations.contains(AllowedOperations.all.name())) {
         doAppends = doSyncs = true;
@@ -250,7 +252,7 @@ public class IOTestProvider implements WALProvider {
       }
       LOG.info("IOTestWriter initialized with appends " + (doAppends ? "enabled" : "disabled") +
           " and syncs " + (doSyncs ? "enabled" : "disabled"));
-      super.init(fs, path, conf, overwritable);
+      super.init(fs, path, conf, overwritable, blocksize);
     }
 
     @Override
@@ -266,9 +268,9 @@ public class IOTestProvider implements WALProvider {
     }
 
     @Override
-    public void sync() throws IOException {
+    public void sync(boolean forceSync) throws IOException {
       if (doSyncs) {
-        super.sync();
+        super.sync(forceSync);
       }
     }
   }

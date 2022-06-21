@@ -20,17 +20,13 @@ package org.apache.hadoop.hbase.replication;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.yetus.audience.InterfaceAudience;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
+import org.apache.hadoop.hbase.wal.WALEdit;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Filter a WAL Entry by the peer config: replicate_all flag, namespaces config, table-cfs config,
@@ -47,7 +43,6 @@ import org.apache.hadoop.hbase.wal.WAL.Entry;
 @InterfaceAudience.Private
 public class NamespaceTableCfWALEntryFilter implements WALEntryFilter, WALCellFilter {
 
-  private static final Logger LOG = LoggerFactory.getLogger(NamespaceTableCfWALEntryFilter.class);
   private final ReplicationPeer peer;
   private BulkLoadCellFilter bulkLoadFilter = new BulkLoadCellFilter();
 
@@ -57,44 +52,10 @@ public class NamespaceTableCfWALEntryFilter implements WALEntryFilter, WALCellFi
 
   @Override
   public Entry filter(Entry entry) {
-    TableName tabName = entry.getKey().getTableName();
-    String namespace = tabName.getNamespaceAsString();
-    ReplicationPeerConfig peerConfig = this.peer.getPeerConfig();
-
-    if (peerConfig.replicateAllUserTables()) {
-      // replicate all user tables, but filter by exclude namespaces config
-      Set<String> excludeNamespaces = peerConfig.getExcludeNamespaces();
-
-      // return null(prevent replicating) if logKey's table is in this peer's
-      // exclude namespaces list
-      if (excludeNamespaces != null && excludeNamespaces.contains(namespace)) {
-        return null;
-      }
-
+    if (ReplicationUtils.contains(this.peer.getPeerConfig(), entry.getKey().getTableName())) {
       return entry;
     } else {
-      // Not replicate all user tables, so filter by namespaces and table-cfs config
-      Set<String> namespaces = peerConfig.getNamespaces();
-      Map<TableName, List<String>> tableCFs = peerConfig.getTableCFsMap();
-
-      if (namespaces == null && tableCFs == null) {
-        return null;
-      }
-
-      // First filter by namespaces config
-      // If table's namespace in peer config, all the tables data are applicable for replication
-      if (namespaces != null && namespaces.contains(namespace)) {
-        return entry;
-      }
-
-      // Then filter by table-cfs config
-      // return null(prevent replicating) if logKey's table isn't in this peer's
-      // replicable tables list
-      if (tableCFs == null || !tableCFs.containsKey(tabName)) {
-        return null;
-      }
-
-      return entry;
+      return null;
     }
   }
 

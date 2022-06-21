@@ -18,10 +18,14 @@
 package org.apache.hadoop.hbase.io.hfile.bucket;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
@@ -137,5 +141,21 @@ public class TestFileIOEngine {
     fileIOEngine.read(offset, len, deserializer);
     ByteBuff data2 = deserializer.getDeserializedByteBuff();
     assertArrayEquals(data1, data2.array());
+  }
+
+  @Test
+  public void testRefreshFileConnection() throws IOException {
+    FileChannel[] fileChannels = fileIOEngine.getFileChannels();
+    FileChannel fileChannel = fileChannels[0];
+    assertNotNull(fileChannel);
+    fileChannel.close();
+    fileIOEngine.refreshFileConnection(0, new IOException("Test Exception"));
+    FileChannel[] reopenedFileChannels = fileIOEngine.getFileChannels();
+    FileChannel reopenedFileChannel = reopenedFileChannels[0];
+    assertNotEquals(fileChannel, reopenedFileChannel);
+    assertEquals(fileChannels.length, reopenedFileChannels.length);
+    for (int i = 1; i < fileChannels.length; i++) {
+      assertEquals(fileChannels[i], reopenedFileChannels[i]);
+    }
   }
 }

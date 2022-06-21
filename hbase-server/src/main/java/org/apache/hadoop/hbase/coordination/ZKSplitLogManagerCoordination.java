@@ -24,7 +24,7 @@ import static org.apache.hadoop.hbase.master.SplitLogManager.TerminationStatus.D
 import static org.apache.hadoop.hbase.master.SplitLogManager.TerminationStatus.FAILURE;
 import static org.apache.hadoop.hbase.master.SplitLogManager.TerminationStatus.IN_PROGRESS;
 import static org.apache.hadoop.hbase.master.SplitLogManager.TerminationStatus.SUCCESS;
-import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
+import static org.apache.hadoop.hbase.util.ConcurrentMapUtils.computeIfAbsent;
 
 import java.io.IOException;
 import java.util.List;
@@ -41,7 +41,7 @@ import org.apache.hadoop.hbase.master.SplitLogManager.ResubmitDirective;
 import org.apache.hadoop.hbase.master.SplitLogManager.Task;
 import org.apache.hadoop.hbase.master.SplitLogManager.TerminationStatus;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
-import org.apache.hadoop.hbase.wal.WALSplitter;
+import org.apache.hadoop.hbase.wal.WALSplitUtil;
 import org.apache.hadoop.hbase.zookeeper.ZKListener;
 import org.apache.hadoop.hbase.zookeeper.ZKMetadata;
 import org.apache.hadoop.hbase.zookeeper.ZKSplitLog;
@@ -92,7 +92,7 @@ public class ZKSplitLogManagerCoordination extends ZKListener implements
       @Override
       public Status finish(ServerName workerName, String logfile) {
         try {
-          WALSplitter.finishSplitLogFile(logfile, conf);
+          WALSplitUtil.finishSplitLogFile(logfile, conf);
         } catch (IOException e) {
           LOG.warn("Could not finish splitting of log file " + logfile, e);
           return Status.ERR;
@@ -122,7 +122,8 @@ public class ZKSplitLogManagerCoordination extends ZKListener implements
   public int remainingTasksInCoordination() {
     int count = 0;
     try {
-      List<String> tasks = ZKUtil.listChildrenNoWatch(watcher, watcher.znodePaths.splitLogZNode);
+      List<String> tasks = ZKUtil.listChildrenNoWatch(watcher,
+              watcher.getZNodePaths().splitLogZNode);
       if (tasks != null) {
         int listSize = tasks.size();
         for (int i = 0; i < listSize; i++) {
@@ -466,13 +467,14 @@ public class ZKSplitLogManagerCoordination extends ZKListener implements
   private void lookForOrphans() {
     List<String> orphans;
     try {
-      orphans = ZKUtil.listChildrenNoWatch(this.watcher, this.watcher.znodePaths.splitLogZNode);
+      orphans = ZKUtil.listChildrenNoWatch(this.watcher,
+              this.watcher.getZNodePaths().splitLogZNode);
       if (orphans == null) {
-        LOG.warn("Could not get children of " + this.watcher.znodePaths.splitLogZNode);
+        LOG.warn("Could not get children of " + this.watcher.getZNodePaths().splitLogZNode);
         return;
       }
     } catch (KeeperException e) {
-      LOG.warn("Could not get children of " + this.watcher.znodePaths.splitLogZNode + " "
+      LOG.warn("Could not get children of " + this.watcher.getZNodePaths().splitLogZNode + " "
           + StringUtils.stringifyException(e));
       return;
     }
@@ -480,7 +482,7 @@ public class ZKSplitLogManagerCoordination extends ZKListener implements
     int listSize = orphans.size();
     for (int i = 0; i < listSize; i++) {
       String path = orphans.get(i);
-      String nodepath = ZNodePaths.joinZNode(watcher.znodePaths.splitLogZNode, path);
+      String nodepath = ZNodePaths.joinZNode(watcher.getZNodePaths().splitLogZNode, path);
       if (ZKSplitLog.isRescanNode(watcher, nodepath)) {
         rescan_nodes++;
         LOG.debug("Found orphan rescan node " + path);

@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
@@ -35,7 +36,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Common helpers for testing HBase that do not depend on specific server/etc. things.
- * {@see org.apache.hadoop.hbase.HBaseTestingUtility}
+ * @see org.apache.hadoop.hbase.HBaseCommonTestingUtility
+ *
  */
 @InterfaceAudience.Public
 public class HBaseCommonTestingUtility {
@@ -144,8 +146,14 @@ public class HBaseCommonTestingUtility {
    * @see #getBaseTestDir()
    */
   public Path getRandomDir() {
-    return new Path(getBaseTestDir(), UUID.randomUUID().toString());
+    return new Path(getBaseTestDir(), getRandomUUID().toString());
   }
+
+  public UUID getRandomUUID() {
+    return new UUID(ThreadLocalRandom.current().nextLong(),
+                    ThreadLocalRandom.current().nextLong());
+  }
+
 
   protected void createSubDir(String propertyName, Path parent, String subDirName) {
     Path newPath = new Path(parent, subDirName);

@@ -28,7 +28,6 @@
   import="java.util.stream.Collectors"
   import="org.apache.hadoop.hbase.HTableDescriptor"
   import="org.apache.hadoop.hbase.RSGroupTableAccessor"
-  import="org.apache.hadoop.hbase.ServerLoad"
   import="org.apache.hadoop.hbase.ServerName"
   import="org.apache.hadoop.hbase.TableName"
   import="org.apache.hadoop.hbase.client.Admin"
@@ -42,21 +41,48 @@
   import="org.apache.hadoop.hbase.util.Bytes"
   import="org.apache.hadoop.hbase.util.VersionInfo"
   import="org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix"%>
+<%@ page import="org.apache.hadoop.hbase.ServerMetrics" %>
+<%@ page import="org.apache.hadoop.hbase.Size" %>
+<%@ page import="org.apache.hadoop.hbase.RegionMetrics" %>
+<%
+  String rsGroupName = request.getParameter("name");
+  pageContext.setAttribute("pageTitle", "RSGroup: " + rsGroupName);
+%>
+<jsp:include page="header.jsp">
+    <jsp:param name="pageTitle" value="${pageTitle}"/>
+</jsp:include>
+<div class="container-fluid content">
 <%
   HMaster master = (HMaster)getServletContext().getAttribute(HMaster.MASTER);
-  String rsGroupName = request.getParameter("name");
-  List<Address> rsGroupServers = new ArrayList<>();
-  List<TableName> rsGroupTables = new ArrayList<>();
   RSGroupInfo rsGroupInfo = null;
-  if (rsGroupName != null && !rsGroupName.isEmpty()) {
-    rsGroupInfo = RSGroupTableAccessor.getRSGroupInfo(
-        master.getConnection(), Bytes.toBytes(rsGroupName));
-    if (rsGroupInfo != null) {
-      rsGroupServers.addAll(rsGroupInfo.getServers());
-      rsGroupTables.addAll(rsGroupInfo.getTables());
-    }
-  }
-  Collections.sort(rsGroupServers);
+  final String ZEROKB = "0 KB";
+  final String ZEROMB = "0 MB";
+  if (!RSGroupTableAccessor.isRSGroupsEnabled(master.getConnection())) {
+%>
+  <div class="row inner_header">
+    <div class="page-header">
+      <h1>RSGroups are not enabled</h1>
+    </div>
+  </div>
+  <jsp:include page="redirect.jsp" />
+<%
+  } else if (rsGroupName == null || rsGroupName.isEmpty() ||
+      (rsGroupInfo = RSGroupTableAccessor.getRSGroupInfo(
+          master.getConnection(), Bytes.toBytes(rsGroupName))) == null) {
+%>
+  <div class="row inner_header">
+    <div class="page-header">
+      <h1>RSGroup: <%= rsGroupName %> does not exist</h1>
+    </div>
+  </div>
+  <jsp:include page="redirect.jsp" />
+<%
+  } else {
+    List<Address> rsGroupServers = new ArrayList<>();
+    List<TableName> rsGroupTables = new ArrayList<>();
+    rsGroupServers.addAll(rsGroupInfo.getServers());
+    rsGroupTables.addAll(rsGroupInfo.getTables());
+    Collections.sort(rsGroupServers);
     rsGroupTables.sort((o1, o2) -> {
       int compare = Bytes.compareTo(o1.getNamespace(), o2.getNamespace());
       if (compare != 0)
@@ -67,29 +93,16 @@
       return 0;
     });
 
-  Map<Address, ServerLoad> onlineServers = Collections.emptyMap();
-  Map<Address, ServerName> serverMaping = Collections.emptyMap();
-  if (master.getServerManager() != null) {
-    onlineServers = master.getServerManager().getOnlineServers().entrySet().stream()
-            .collect(Collectors.toMap(p -> p.getKey().getAddress(), Map.Entry::getValue));
-    serverMaping =
-        master.getServerManager().getOnlineServers().entrySet().stream()
-            .collect(Collectors.toMap(p -> p.getKey().getAddress(), Map.Entry::getKey));
-  }
-  pageContext.setAttribute("pageTitle", "RSGroup: " + rsGroupName);
+    Map<Address, ServerMetrics> onlineServers = Collections.emptyMap();
+    Map<Address, ServerName> serverMaping = Collections.emptyMap();
+    if (master.getServerManager() != null) {
+      onlineServers = master.getServerManager().getOnlineServers().entrySet().stream()
+              .collect(Collectors.toMap(p -> p.getKey().getAddress(), Map.Entry::getValue));
+      serverMaping =
+          master.getServerManager().getOnlineServers().entrySet().stream()
+              .collect(Collectors.toMap(p -> p.getKey().getAddress(), Map.Entry::getKey));
+    }
 %>
-<jsp:include page="header.jsp">
-    <jsp:param name="pageTitle" value="${pageTitle}"/>
-</jsp:include>
-<div class="container-fluid content">
-  <% if (rsGroupName == null || rsGroupName.isEmpty() || rsGroupInfo == null) { %>
-  <div class="row inner_header">
-      <div class="page-header">
-          <h1>RSGroup: "<%= rsGroupName %>" does not exist</h1>
-      </div>
-  </div>
-  <p>Go <a href="javascript:history.back()">Back</a>, or wait for the redirect.
-  <% } else { %>
   <div class="container-fluid content">
     <div class="row">
       <div class="page-header">
@@ -135,13 +148,13 @@
               <th>Num. Regions</th>
             </tr>
             <% int totalRegions = 0;
-               int totalRequests = 0;
+               int totalRequestsPerSecond = 0;
                int inconsistentNodeNum = 0;
                String masterVersion = VersionInfo.getVersion();
                for (Address server: rsGroupServers) {
                  ServerName serverName = serverMaping.get(server);
                  if (serverName != null) {
-                   ServerLoad sl = onlineServers.get(server);
+                   ServerMetrics sl = onlineServers.get(server);
                    String version = master.getRegionServerVersion(serverName);
                    if (!masterVersion.equals(version)) {
                      inconsistentNodeNum ++;
@@ -150,11 +163,11 @@
                    int numRegionsOnline = 0;
                    long lastContact = 0;
                    if (sl != null) {
-                     requestsPerSecond = sl.getRequestsPerSecond();
-                     numRegionsOnline = sl.getNumberOfRegions();
-                     totalRegions += sl.getNumberOfRegions();
-                     totalRequests += sl.getNumberOfRequests();
-                     lastContact = (System.currentTimeMillis() - sl.getReportTime())/1000;
+                     requestsPerSecond = sl.getRequestCountPerSecond();
+                     numRegionsOnline = sl.getRegionMetrics().size();
+                     totalRegions += sl.getRegionMetrics().size();
+                     totalRequestsPerSecond += sl.getRequestCountPerSecond();
+                     lastContact = (System.currentTimeMillis() - sl.getReportTimestamp())/1000;
                    }
                    long startcode = serverName.getStartcode();
                    int infoPort = master.getRegionServerInfoPort(serverName);
@@ -186,7 +199,7 @@
             <%} else { %>
                 <td></td>
             <%} %>
-            <td><%= totalRequests %></td>
+            <td><%= totalRequestsPerSecond %></td>
             <td><%= totalRegions %></td>
             </tr>
           </table>
@@ -199,21 +212,41 @@
               <th>Max Heap</th>
               <th>Memstore Size</th>
             </tr>
-            <% for (Address server: rsGroupServers) {
+            <%
+               String usedHeapSizeMBStr = ZEROMB;
+               String maxHeapSizeMBStr = ZEROMB;
+               String memStoreSizeMBStr = ZEROMB;
+
+               for (Address server: rsGroupServers) {
                  ServerName serverName = serverMaping.get(server);
-                 ServerLoad sl = onlineServers.get(server);
+                 ServerMetrics sl = onlineServers.get(server);
                  if (sl != null && serverName != null) {
+                   double usedHeapSizeMB = sl.getUsedHeapSize().get(Size.Unit.MEGABYTE);
+                   double maxHeapSizeMB = sl.getMaxHeapSize().get(Size.Unit.MEGABYTE);
+                   double memStoreSizeMB = sl.getRegionMetrics().values()
+                           .stream().mapToDouble(rm -> rm.getMemStoreSize().get(Size.Unit.MEGABYTE))
+                           .sum();
                    int infoPort = master.getRegionServerInfoPort(serverName);
                    String url = "//" + serverName.getHostname() + ":" + infoPort + "/rs-status";
+
+                   if (memStoreSizeMB > 0) {
+                     memStoreSizeMBStr = TraditionalBinaryPrefix.long2String(
+                     (long) memStoreSizeMB * TraditionalBinaryPrefix.MEGA.value, "B", 1);
+                   }
+                   if (usedHeapSizeMB > 0) {
+                     usedHeapSizeMBStr = TraditionalBinaryPrefix.long2String(
+                     (long) usedHeapSizeMB * TraditionalBinaryPrefix.MEGA.value, "B", 1);
+                   }
+                   if (maxHeapSizeMB > 0) {
+                      maxHeapSizeMBStr = TraditionalBinaryPrefix.long2String(
+                      (long) maxHeapSizeMB * TraditionalBinaryPrefix.MEGA.value, "B", 1);
+                   }
             %>
                    <tr>
                      <td><a href="<%= url %>"><%= serverName.getServerName() %></a></td>
-                     <td><%= TraditionalBinaryPrefix.long2String(sl.getUsedHeapMB()
-                       * TraditionalBinaryPrefix.MEGA.value, "B", 1) %></td>
-                     <td><%= TraditionalBinaryPrefix.long2String(sl.getMaxHeapMB()
-                       * TraditionalBinaryPrefix.MEGA.value, "B", 1) %></td>
-                     <td><%= TraditionalBinaryPrefix.long2String(sl.getMemstoreSizeInMB()
-                       * TraditionalBinaryPrefix.MEGA.value, "B", 1) %></td>
+                     <td><%= usedHeapSizeMBStr %></td>
+                     <td><%= maxHeapSizeMBStr %></td>
+                     <td><%= memStoreSizeMBStr %></td>
                    </tr>
               <% } else { %>
                    <tr>
@@ -236,16 +269,22 @@
             </tr>
             <% for (Address server: rsGroupServers) {
                  ServerName serverName = serverMaping.get(server);
-                 ServerLoad sl = onlineServers.get(server);
+                 ServerMetrics sl = onlineServers.get(server);
                  if (sl != null && serverName != null) {
                    int infoPort = master.getRegionServerInfoPort(serverName);
+                   long readRequestCount = 0;
+                   long writeRequestCount = 0;
+                   for (RegionMetrics rm : sl.getRegionMetrics().values()) {
+                     readRequestCount += rm.getReadRequestCount();
+                     writeRequestCount += rm.getWriteRequestCount();
+                   }
                    String url = "//" + serverName.getHostname() + ":" + infoPort + "/rs-status";
             %>
                    <tr>
                      <td><a href="<%= url %>"><%= serverName.getServerName() %></a></td>
-                     <td><%= String.format("%.0f", sl.getRequestsPerSecond()) %></td>
-                     <td><%= sl.getReadRequestsCount() %></td>
-                     <td><%= sl.getWriteRequestsCount() %></td>
+                     <td><%= sl.getRequestCountPerSecond() %></td>
+                     <td><%= readRequestCount %></td>
+                     <td><%= writeRequestCount %></td>
                    </tr>
               <% } else { %>
                    <tr>
@@ -269,25 +308,56 @@
                 <th>Index Size</th>
                 <th>Bloom Size</th>
             </tr>
-            <%  for (Address server: rsGroupServers) {
+            <%
+               String storeUncompressedSizeMBStr = ZEROMB;
+               String storeFileSizeMBStr = ZEROMB;
+               String totalStaticIndexSizeKBStr = ZEROKB;
+               String totalStaticBloomSizeKBStr = ZEROKB;
+               for (Address server: rsGroupServers) {
                   ServerName serverName = serverMaping.get(server);
-                  ServerLoad sl = onlineServers.get(server);
+                  ServerMetrics sl = onlineServers.get(server);
                   if (sl != null && serverName != null) {
+                    long storeCount = 0;
+                    long storeFileCount = 0;
+                    double storeUncompressedSizeMB = 0;
+                    double storeFileSizeMB = 0;
+                    double totalStaticIndexSizeKB = 0;
+                    double totalStaticBloomSizeKB = 0;
+                    for (RegionMetrics rm : sl.getRegionMetrics().values()) {
+                      storeCount += rm.getStoreCount();
+                      storeFileCount += rm.getStoreFileCount();
+                      storeUncompressedSizeMB += rm.getUncompressedStoreFileSize().get(Size.Unit.MEGABYTE);
+                      storeFileSizeMB += rm.getStoreFileSize().get(Size.Unit.MEGABYTE);
+                      totalStaticIndexSizeKB += rm.getStoreFileUncompressedDataIndexSize().get(Size.Unit.KILOBYTE);
+                      totalStaticBloomSizeKB += rm.getBloomFilterSize().get(Size.Unit.KILOBYTE);
+                    }
                     int infoPort = master.getRegionServerInfoPort(serverName);
                     String url = "//" + serverName.getHostname() + ":" + infoPort + "/rs-status";
+                    if (storeUncompressedSizeMB > 0) {
+                      storeUncompressedSizeMBStr = TraditionalBinaryPrefix.long2String(
+                      (long) storeUncompressedSizeMB * TraditionalBinaryPrefix.MEGA.value, "B", 1);
+                    }
+                    if (storeFileSizeMB > 0) {
+                      storeFileSizeMBStr = TraditionalBinaryPrefix.long2String(
+                      (long) storeFileSizeMB * TraditionalBinaryPrefix.MEGA.value, "B", 1);
+                    }
+                    if (totalStaticIndexSizeKB > 0) {
+                      totalStaticIndexSizeKBStr = TraditionalBinaryPrefix.long2String(
+                      (long) totalStaticIndexSizeKB * TraditionalBinaryPrefix.KILO.value, "B", 1);
+                    }
+                    if (totalStaticBloomSizeKB > 0) {
+                      totalStaticBloomSizeKBStr = TraditionalBinaryPrefix.long2String(
+                      (long) totalStaticBloomSizeKB * TraditionalBinaryPrefix.KILO.value, "B", 1);
+                    }
             %>
                     <tr>
                       <td><a href="<%= url %>"><%= serverName.getServerName() %></a></td>
-                      <td><%= sl.getStores() %></td>
-                      <td><%= sl.getStorefiles() %></td>
-                      <td><%= TraditionalBinaryPrefix.long2String(
-                          sl.getStoreUncompressedSizeMB() * TraditionalBinaryPrefix.MEGA.value, "B", 1) %></td>
-                      <td><%= TraditionalBinaryPrefix.long2String(sl.getStorefileSizeInMB()
-                          * TraditionalBinaryPrefix.MEGA.value, "B", 1) %></td>
-                      <td><%= TraditionalBinaryPrefix.long2String(sl.getTotalStaticIndexSizeKB()
-                          * TraditionalBinaryPrefix.KILO.value, "B", 1) %></td>
-                      <td><%= TraditionalBinaryPrefix.long2String(sl.getTotalStaticBloomSizeKB()
-                          * TraditionalBinaryPrefix.KILO.value, "B", 1) %></td>
+                      <td><%= storeCount %></td>
+                      <td><%= storeFileCount %></td>
+                      <td><%= storeUncompressedSizeMBStr %></td>
+                      <td><%= storeFileSizeMBStr %></td>
+                      <td><%= totalStaticIndexSizeKBStr %></td>
+                      <td><%= totalStaticBloomSizeKBStr %></td>
                     </tr>
                <% } else { %>
                     <tr>
@@ -314,21 +384,27 @@
             </tr>
             <%  for (Address server: rsGroupServers) {
                   ServerName serverName = serverMaping.get(server);
-                  ServerLoad sl = onlineServers.get(server);
+                  ServerMetrics sl = onlineServers.get(server);
                   if (sl != null && serverName != null) {
+                    long totalCompactingCells = 0;
+                    long currentCompactedCells = 0;
+                    for (RegionMetrics rm : sl.getRegionMetrics().values()) {
+                      totalCompactingCells += rm.getCompactingCellCount();
+                      currentCompactedCells += rm.getCompactedCellCount();
+                    }
                     String percentDone = "";
-                    if  (sl.getTotalCompactingKVs() > 0) {
+                    if  (totalCompactingCells > 0) {
                          percentDone = String.format("%.2f", 100 *
-                            ((float) sl.getCurrentCompactedKVs() / sl.getTotalCompactingKVs())) + "%";
+                            ((float) currentCompactedCells / totalCompactingCells)) + "%";
                     }
                     int infoPort = master.getRegionServerInfoPort(serverName);
                     String url = "//" + serverName.getHostname() + ":" + infoPort + "/rs-status";
             %>
                     <tr>
                       <td><a href="<%= url %>"><%= serverName.getServerName() %></a></td>
-                      <td><%= sl.getTotalCompactingKVs() %></td>
-                      <td><%= sl.getCurrentCompactedKVs() %></td>
-                      <td><%= sl.getTotalCompactingKVs() - sl.getCurrentCompactedKVs() %></td>
+                      <td><%= totalCompactingCells %></td>
+                      <td><%= currentCompactedCells %></td>
+                      <td><%= totalCompactingCells - currentCompactedCells %></td>
                       <td><%= percentDone %></td>
                     </tr>
                <% } else { %>
@@ -397,13 +473,12 @@
                 <tr>
                   <td><%= tableName.getNamespaceAsString() %></td>
                   <td><a href="/table.jsp?name=<%= tableName.getNameAsString() %>"><%= tableName.getQualifierAsString() %></a></td>
-              <% TableState.State tableState = master.getTableStateManager().getTableState(tableName);
-                  if(TableState.isInStates(tableState,
-                          TableState.State.DISABLED, TableState.State.DISABLING)) {
+              <% TableState tableState = master.getTableStateManager().getTableState(tableName);
+                  if(tableState.isDisabledOrDisabling()) {
               %>
-                  <td style="color:red;"><%= tableState.name() %></td>
+                  <td style="color:red;"><%= tableState.getState().name() %></td>
               <% } else {  %>
-                  <td><%= tableState.name() %></td>
+                  <td><%= tableState.getState().name() %></td>
               <% } %>
               <% Map<RegionState.State, List<RegionInfo>> tableRegions =
                      master.getAssignmentManager().getRegionStates().getRegionByStateOfTable(tableName);

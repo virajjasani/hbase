@@ -26,6 +26,7 @@ import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.executor.EventHandler;
 import org.apache.hadoop.hbase.executor.EventType;
+import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices.RegionStateTransitionContext;
@@ -36,6 +37,11 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProto
 
 /**
  * Handles closing of a region on a region server.
+ * <p/>
+ * Now for regular close region request, we will use {@link UnassignRegionHandler} instead. But when
+ * shutting down the region server, will also close regions and the related methods still use this
+ * class so we keep it here.
+ * @see UnassignRegionHandler
  */
 @InterfaceAudience.Private
 public class CloseRegionHandler extends EventHandler {
@@ -88,13 +94,13 @@ public class CloseRegionHandler extends EventHandler {
   @Override
   public void process() {
     try {
-      String name = regionInfo.getRegionNameAsString();
-      LOG.debug("Processing close of " + name);
+      String name = regionInfo.getEncodedName();
+      LOG.trace("Processing close of {}", name);
       String encodedRegionName = regionInfo.getEncodedName();
       // Check that this region is being served here
       HRegion region = (HRegion)rsServices.getRegion(encodedRegionName);
       if (region == null) {
-        LOG.warn("Received CLOSE for region " + name + " but currently not serving - ignoring");
+        LOG.warn("Received CLOSE for region {} but currently not serving - ignoring", name);
         // TODO: do better than a simple warning
         return;
       }
@@ -104,8 +110,7 @@ public class CloseRegionHandler extends EventHandler {
         if (region.close(abort) == null) {
           // This region got closed.  Most likely due to a split.
           // The split message will clean up the master state.
-          LOG.warn("Can't close region: was already closed during close(): " +
-            name);
+          LOG.warn("Can't close region {}, was already closed during close()", name);
           return;
         }
       } catch (IOException ioe) {
@@ -119,7 +124,7 @@ public class CloseRegionHandler extends EventHandler {
 
       this.rsServices.removeRegion(region, destination);
       rsServices.reportRegionStateTransition(new RegionStateTransitionContext(TransitionCode.CLOSED,
-          HConstants.NO_SEQNUM, -1, regionInfo));
+        HConstants.NO_SEQNUM, Procedure.NO_PROC_ID, -1, regionInfo));
 
       // Done!  Region is closed on this RS
       LOG.debug("Closed " + region.getRegionInfo().getRegionNameAsString());

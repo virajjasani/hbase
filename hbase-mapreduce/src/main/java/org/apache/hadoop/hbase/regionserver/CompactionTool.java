@@ -173,6 +173,8 @@ public class CompactionTool extends Configured implements Tool {
           }
         }
       } while (store.needsCompaction() && !compactOnce);
+      //We need to close the store properly, to make sure it will archive compacted files
+      store.close();
     }
 
     /**
@@ -189,7 +191,7 @@ public class CompactionTool extends Configured implements Tool {
         }
       };
       HRegion region = new HRegion(regionFs, null, conf, htd, null);
-      return new HStore(region, htd.getColumnFamily(Bytes.toBytes(familyName)), conf);
+      return new HStore(region, htd.getColumnFamily(Bytes.toBytes(familyName)), conf, false);
     }
   }
 
@@ -460,10 +462,10 @@ public class CompactionTool extends Configured implements Tool {
     System.err.println();
     System.err.println("Examples:");
     System.err.println(" To compact the full 'TestTable' using MapReduce:");
-    System.err.println(" $ hbase " + this.getClass().getName() + " -mapred hdfs:///hbase/data/default/TestTable");
+    System.err.println(" $ hbase " + this.getClass().getName() + " -mapred hdfs://hbase/data/default/TestTable");
     System.err.println();
     System.err.println(" To compact column family 'x' of the table 'TestTable' region 'abc':");
-    System.err.println(" $ hbase " + this.getClass().getName() + " hdfs:///hbase/data/default/TestTable/abc/x");
+    System.err.println(" $ hbase " + this.getClass().getName() + " hdfs://hbase/data/default/TestTable/abc/x");
   }
 
   public static void main(String[] args) throws Exception {

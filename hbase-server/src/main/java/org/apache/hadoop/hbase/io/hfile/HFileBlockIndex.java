@@ -266,7 +266,7 @@ public class HFileBlockIndex {
 
         // Adding blockKeys
         for (Cell key : blockKeys) {
-          heapSize += ClassSize.align(PrivateCellUtil.estimatedHeapSizeOf(key));
+          heapSize += ClassSize.align(key.heapSize());
         }
       }
       // Add comparator and the midkey atomicreference
@@ -745,7 +745,7 @@ public class HFileBlockIndex {
       ByteBufferKeyOnlyKeyValue nonRootIndexkeyOnlyKV = new ByteBufferKeyOnlyKeyValue();
       ObjectIntPair<ByteBuffer> pair = new ObjectIntPair<>();
       while (low <= high) {
-        mid = (low + high) >>> 1;
+        mid = low + ((high - low) >> 1);
 
         // Midkey's offset relative to the end of secondary index
         int midKeyRelOffset = nonRootIndex.getIntAfterPosition(Bytes.SIZEOF_INT * (mid + 1));
@@ -1103,9 +1103,11 @@ public class HFileBlockIndex {
           blockStream.write(midKeyMetadata);
         blockWriter.writeHeaderAndData(out);
         if (cacheConf != null) {
-          HFileBlock blockForCaching = blockWriter.getBlockForCaching(cacheConf);
-          cacheConf.getBlockCache().cacheBlock(new BlockCacheKey(nameForCaching,
-            rootLevelIndexPos, true, blockForCaching.getBlockType()), blockForCaching);
+          cacheConf.getBlockCache().ifPresent(cache -> {
+            HFileBlock blockForCaching = blockWriter.getBlockForCaching(cacheConf);
+            cache.cacheBlock(new BlockCacheKey(nameForCaching, rootLevelIndexPos, true,
+                blockForCaching.getBlockType()), blockForCaching);
+          });
         }
       }
 
@@ -1207,9 +1209,12 @@ public class HFileBlockIndex {
       blockWriter.writeHeaderAndData(out);
 
       if (getCacheOnWrite()) {
-        HFileBlock blockForCaching = blockWriter.getBlockForCaching(cacheConf);
-        cacheConf.getBlockCache().cacheBlock(new BlockCacheKey(nameForCaching,
-          beginOffset, true, blockForCaching.getBlockType()), blockForCaching);
+        cacheConf.getBlockCache().ifPresent(cache -> {
+          HFileBlock blockForCaching = blockWriter.getBlockForCaching(cacheConf);
+          cache.cacheBlock(
+              new BlockCacheKey(nameForCaching, beginOffset, true, blockForCaching.getBlockType()),
+              blockForCaching);
+        });
       }
 
       // Add intermediate index block size
@@ -1481,7 +1486,7 @@ public class HFileBlockIndex {
      * The same as {@link #add(byte[], long, int, long)} but does not take the
      * key/value into account. Used for single-level indexes.
      *
-     * @see {@link #add(byte[], long, int, long)}
+     * @see #add(byte[], long, int, long)
      */
     public void add(byte[] firstKey, long blockOffset, int onDiskDataSize) {
       add(firstKey, blockOffset, onDiskDataSize, -1);

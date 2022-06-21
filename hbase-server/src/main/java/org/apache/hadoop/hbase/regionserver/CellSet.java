@@ -53,7 +53,7 @@ public class CellSet implements NavigableSet<Cell>  {
   private final int numUniqueKeys;
 
   CellSet(final CellComparator c) {
-    this.delegatee = new ConcurrentSkipListMap<>(c);
+    this.delegatee = new ConcurrentSkipListMap<>(c.getSimpleComparator());
     this.numUniqueKeys = UNKNOWN_NUM_UNIQUES;
   }
 
@@ -217,6 +217,9 @@ public class CellSet implements NavigableSet<Cell>  {
 
   @Override
   public int size() {
+    if (delegatee instanceof ConcurrentSkipListMap) {
+      throw new UnsupportedOperationException("ConcurrentSkipListMap.size() is time-consuming");
+    }
     return this.delegatee.size();
   }
 

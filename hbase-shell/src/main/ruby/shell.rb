@@ -68,22 +68,18 @@ module Shell
   end
 
   #----------------------------------------------------------------------
+  # rubocop:disable Metrics/ClassLength
   class Shell
     attr_accessor :hbase
     attr_accessor :interactive
-    attr_accessor :return_values
     alias interactive? interactive
-    alias return_values? return_values
 
     @debug = false
     attr_accessor :debug
 
-    def initialize(hbase, interactive = true, return_values = !interactive)
+    def initialize(hbase, interactive = true)
       self.hbase = hbase
       self.interactive = interactive
-      self.return_values = return_values
-      # If we're in non-interactive mode, force return_values
-      self.return_values = true unless self.interactive
     end
 
     # Returns Admin class from admin.rb
@@ -140,11 +136,8 @@ module Shell
     end
 
     # call the method 'command' on the specified command
-    # If return_values is false, then we suppress the return value. The command
-    # should have printed relevant output.
     def command(command, *args)
-      ret = internal_command(command, :command, *args)
-      ret if return_values
+      internal_command(command, :command, *args)
     end
 
     # call a specific internal method in the command instance
@@ -159,6 +152,7 @@ module Shell
       puts 'HBase Shell'
       puts 'Use "help" to get list of supported commands.'
       puts 'Use "exit" to quit this interactive shell.'
+      puts 'For Reference, please visit: http://hbase.apache.org/2.0/book.html#shell'
       print 'Version '
       command('version')
       puts
@@ -245,6 +239,7 @@ For more on the HBase Shell, see http://hbase.apache.org/book.html
       HERE
     end
   end
+  # rubocop:enable Metrics/ClassLength
 end
 
 # Load commands base class
@@ -286,6 +281,7 @@ Shell.load_command_group(
     get_table
     locate_region
     list_regions
+    clone_table_schema
   ],
   aliases: {
     'describe' => ['desc']
@@ -339,6 +335,7 @@ Shell.load_command_group(
     is_in_maintenance_mode
     close_region
     compact
+    compaction_switch
     flush
     major_compact
     move
@@ -347,6 +344,7 @@ Shell.load_command_group(
     unassign
     zk_dump
     wal_roll
+    hbck_chore_run
     catalogjanitor_run
     catalogjanitor_switch
     catalogjanitor_enabled
@@ -362,6 +360,12 @@ Shell.load_command_group(
     list_deadservers
     clear_deadservers
     clear_block_cache
+    stop_master
+    stop_regionserver
+    rit
+    list_decommissioned_regionservers
+    decommission_regionservers
+    recommission_regionserver
   ],
   # TODO: remove older hlog_roll command
   aliases: {
@@ -379,13 +383,18 @@ Shell.load_command_group(
     enable_peer
     disable_peer
     set_peer_replicate_all
+    set_peer_serial
     set_peer_namespaces
     append_peer_namespaces
     remove_peer_namespaces
     set_peer_exclude_namespaces
+    append_peer_exclude_namespaces
+    remove_peer_exclude_namespaces
     show_peer_tableCFs
     set_peer_tableCFs
     set_peer_exclude_tableCFs
+    append_peer_exclude_tableCFs
+    remove_peer_exclude_tableCFs
     set_peer_bandwidth
     list_replicated_tables
     append_peer_tableCFs
@@ -431,6 +440,10 @@ Shell.load_command_group(
     list_quota_table_sizes
     list_quota_snapshots
     list_snapshot_sizes
+    enable_rpc_throttle
+    disable_rpc_throttle
+    enable_exceed_throttle_quota
+    disable_exceed_throttle_quota
   ]
 )
 
@@ -450,7 +463,6 @@ Shell.load_command_group(
   'procedures',
   full_name: 'PROCEDURES & LOCKS MANAGEMENT',
   commands: %w[
-    abort_procedure
     list_procedures
     list_locks
   ]

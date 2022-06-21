@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -38,6 +38,8 @@ import org.apache.hadoop.hbase.replication.regionserver.ReplicationSyncUp;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.ReplicationTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.util.ToolRunner;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
@@ -45,7 +47,7 @@ import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-@Category({ReplicationTests.class, LargeTests.class})
+@Category({ ReplicationTests.class, LargeTests.class })
 public class TestReplicationSyncUpTool extends TestReplicationBase {
 
   @ClassRule
@@ -69,7 +71,6 @@ public class TestReplicationSyncUpTool extends TestReplicationBase {
 
   @Before
   public void setUp() throws Exception {
-
     HColumnDescriptor fam;
 
     t1_syncupSource = new HTableDescriptor(t1_su);
@@ -97,7 +98,12 @@ public class TestReplicationSyncUpTool extends TestReplicationBase {
     t2_syncupTarget.addFamily(fam);
     fam = new HColumnDescriptor(noRepfamName);
     t2_syncupTarget.addFamily(fam);
+  }
 
+  @After
+  public void tearDownBase() throws Exception {
+    // Do nothing, just replace the super tearDown. because the super tearDown will use the
+    // out-of-data HBase admin to remove replication peer, which will be result in failure.
   }
 
   /**
@@ -181,7 +187,6 @@ public class TestReplicationSyncUpTool extends TestReplicationBase {
      * verify correctly replicated to Slave
      */
     mimicSyncUpAfterPut();
-
   }
 
   protected void setupReplication() throws Exception {
@@ -422,9 +427,6 @@ public class TestReplicationSyncUpTool extends TestReplicationBase {
   }
 
   protected void syncUp(HBaseTestingUtility ut) throws Exception {
-    ReplicationSyncUp.setConfigure(ut.getConfiguration());
-    String[] arguments = new String[] { null };
-    new ReplicationSyncUp().run(arguments);
+    ToolRunner.run(ut.getConfiguration(), new ReplicationSyncUp(), new String[0]);
   }
-
 }

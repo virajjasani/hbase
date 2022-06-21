@@ -28,6 +28,7 @@ import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.List;
 import java.util.Set;
 import org.apache.hadoop.conf.Configuration;
@@ -41,7 +42,6 @@ import org.apache.hadoop.hbase.security.access.Permission;
 import org.apache.hadoop.hbase.security.visibility.Authorizations;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
-import org.apache.hadoop.hbase.util.Base64;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.Assert;
 import org.junit.ClassRule;
@@ -54,7 +54,6 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 // TODO: cover more test cases
 @Category({ClientTests.class, SmallTests.class})
 public class TestGet {
-
   @ClassRule
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestGet.class);
@@ -122,19 +121,22 @@ public class TestGet {
     get.setAttribute("attribute1", Bytes.toBytes("value1"));
     Assert.assertTrue(Arrays.equals(Bytes.toBytes("value1"), get.getAttribute("attribute1")));
     Assert.assertEquals(1, get.getAttributesMap().size());
-    Assert.assertTrue(Arrays.equals(Bytes.toBytes("value1"), get.getAttributesMap().get("attribute1")));
+    Assert.assertTrue(Arrays.equals(Bytes.toBytes("value1"),
+        get.getAttributesMap().get("attribute1")));
 
     // overriding attribute value
     get.setAttribute("attribute1", Bytes.toBytes("value12"));
     Assert.assertTrue(Arrays.equals(Bytes.toBytes("value12"), get.getAttribute("attribute1")));
     Assert.assertEquals(1, get.getAttributesMap().size());
-    Assert.assertTrue(Arrays.equals(Bytes.toBytes("value12"), get.getAttributesMap().get("attribute1")));
+    Assert.assertTrue(Arrays.equals(Bytes.toBytes("value12"),
+        get.getAttributesMap().get("attribute1")));
 
     // adding another attribute
     get.setAttribute("attribute2", Bytes.toBytes("value2"));
     Assert.assertTrue(Arrays.equals(Bytes.toBytes("value2"), get.getAttribute("attribute2")));
     Assert.assertEquals(2, get.getAttributesMap().size());
-    Assert.assertTrue(Arrays.equals(Bytes.toBytes("value2"), get.getAttributesMap().get("attribute2")));
+    Assert.assertTrue(Arrays.equals(Bytes.toBytes("value2"),
+        get.getAttributesMap().get("attribute2")));
 
     // removing attribute
     get.setAttribute("attribute2", null);
@@ -214,9 +216,9 @@ public class TestGet {
     assertFalse("Should be deleted: " + jarFile.getPath(), jarFile.exists());
 
     ClientProtos.Get getProto1 =
-      ClientProtos.Get.parseFrom(Base64.decode(PB_GET));
+      ClientProtos.Get.parseFrom(Base64.getDecoder().decode(PB_GET));
     ClientProtos.Get getProto2 =
-      ClientProtos.Get.parseFrom(Base64.decode(PB_GET_WITH_FILTER_LIST));
+      ClientProtos.Get.parseFrom(Base64.getDecoder().decode(PB_GET_WITH_FILTER_LIST));
     try {
       ProtobufUtil.toGet(getProto1);
       fail("Should not be able to load the filter class");
@@ -233,7 +235,7 @@ public class TestGet {
         instanceof DeserializationException);
     }
     FileOutputStream fos = new FileOutputStream(jarFile);
-    fos.write(Base64.decode(MOCK_FILTER_JAR));
+    fos.write(Base64.getDecoder().decode(MOCK_FILTER_JAR));
     fos.close();
 
     Get get1 = ProtobufUtil.toGet(getProto1);

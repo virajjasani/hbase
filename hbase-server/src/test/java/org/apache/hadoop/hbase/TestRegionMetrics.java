@@ -20,11 +20,15 @@ package org.apache.hadoop.hbase;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import org.apache.hadoop.hbase.ClusterMetrics.Option;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.RegionInfo;
@@ -37,6 +41,8 @@ import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
 
@@ -47,6 +53,7 @@ public class TestRegionMetrics {
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestRegionMetrics.class);
 
+  private static final Logger LOG = LoggerFactory.getLogger(TestRegionMetrics.class);
   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
   private static Admin admin;
 
@@ -54,9 +61,13 @@ public class TestRegionMetrics {
   private static final TableName TABLE_2 = TableName.valueOf("table_2");
   private static final TableName TABLE_3 = TableName.valueOf("table_3");
   private static final TableName[] tables = new TableName[] { TABLE_1, TABLE_2, TABLE_3 };
+  private static final int MSG_INTERVAL = 500; // ms
 
   @BeforeClass
   public static void beforeClass() throws Exception {
+    // Make servers report eagerly. This test is about looking at the cluster status reported.
+    // Make it so we don't have to wait around too long to see change.
+    UTIL.getConfiguration().setInt("hbase.regionserver.msginterval", MSG_INTERVAL);
     UTIL.startMiniCluster(4);
     admin = UTIL.getAdmin();
     admin.balancerSwitch(false, true);
@@ -101,14 +112,47 @@ public class TestRegionMetrics {
       checkRegionsAndRegionMetrics(tableRegions, regionMetrics);
     }
 
-    // Check RegionMetrics matches the RegionMetrics from ClusterStatus
-    ClusterMetrics clusterStatus = admin.getClusterMetrics(EnumSet.of(Option.LIVE_SERVERS));
-    for (Map.Entry<ServerName, ServerMetrics> entry : clusterStatus.getLiveServerMetrics()
-        .entrySet()) {
+    // Just wait here. If this fixes the test, come back and do a better job.
+    // Would have to redo the below so can wait on cluster status changing.
+    // Admin#getClusterMetrics retrieves data from HMaster. Admin#getRegionMetrics, by contrast,
+    // get the data from RS. Hence, it will fail if we do the assert check before RS has done
+    // the report.
+    TimeUnit.MILLISECONDS.sleep(3 * MSG_INTERVAL);
+
+    // Check RegionMetrics matches the RegionMetrics from ClusterMetrics
+    for (Map.Entry<ServerName, ServerMetrics> entry : admin
+      .getClusterMetrics(EnumSet.of(Option.LIVE_SERVERS)).getLiveServerMetrics().entrySet()) {
       ServerName serverName = entry.getKey();
       ServerMetrics serverMetrics = entry.getValue();
       List<RegionMetrics> regionMetrics = admin.getRegionMetrics(serverName);
+      LOG.debug("serverName=" + serverName + ", getRegionLoads=" +
+        serverMetrics.getRegionMetrics().keySet().stream().map(r -> Bytes.toString(r)).
+          collect(Collectors.toList()));
+      LOG.debug("serverName=" + serverName + ", regionLoads=" +
+        regionMetrics.stream().map(r -> Bytes.toString(r.getRegionName())).
+          collect(Collectors.toList()));
       assertEquals(serverMetrics.getRegionMetrics().size(), regionMetrics.size());
+      checkMetricsValue(regionMetrics, serverMetrics);
+    }
+  }
+
+  private void checkMetricsValue(List<RegionMetrics> regionMetrics, ServerMetrics serverMetrics)
+    throws InvocationTargetException, IllegalAccessException {
+    for (RegionMetrics fromRM : regionMetrics) {
+      RegionMetrics fromSM = serverMetrics.getRegionMetrics().get(fromRM.getRegionName());
+      Class clazz = RegionMetrics.class;
+      for (Method method : clazz.getMethods()) {
+        // check numeric values only
+        if (method.getReturnType().equals(Size.class)
+          || method.getReturnType().equals(int.class)
+          || method.getReturnType().equals(long.class)
+          || method.getReturnType().equals(float.class)) {
+          Object valueRm = method.invoke(fromRM);
+          Object valueSM = method.invoke(fromSM);
+          assertEquals("Return values of method " + method.getName() + " are different",
+              valueRm.toString(), valueSM.toString());
+        }
+      }
     }
   }
 

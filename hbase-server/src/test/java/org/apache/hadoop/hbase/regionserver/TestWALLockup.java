@@ -53,9 +53,9 @@ import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.wal.WALKey;
 import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.hadoop.hbase.wal.WALProvider.Writer;
-import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Rule;
@@ -171,11 +171,11 @@ public class TestWALLockup {
         }
 
         @Override
-        public void sync() throws IOException {
+        public void sync(boolean forceSync) throws IOException {
           if (throwException) {
             throw new IOException("FAKE! Failed to replace a bad datanode...SYNC");
           }
-          w.sync();
+          w.sync(forceSync);
         }
 
         @Override
@@ -214,6 +214,7 @@ public class TestWALLockup {
     FileSystem fs = FileSystem.get(CONF);
     Path rootDir = new Path(dir + getName());
     DodgyFSLog dodgyWAL = new DodgyFSLog(fs, rootDir, getName(), CONF);
+    dodgyWAL.init();
     Path originalWAL = dodgyWAL.getCurrentFileName();
     // I need a log roller running.
     LogRoller logRoller = new LogRoller(server, services);
@@ -251,7 +252,7 @@ public class TestWALLockup {
       dodgyWAL.append(region.getRegionInfo(), key, edit, true);
       boolean exception = false;
       try {
-        dodgyWAL.sync();
+        dodgyWAL.sync(false);
       } catch (Exception e) {
         exception = true;
       }
@@ -264,8 +265,8 @@ public class TestWALLockup {
         @Override
         public void run() {
           try {
-            if (region.getMemStoreSize() <= 0) {
-              throw new IOException("memstore size=" + region.getMemStoreSize());
+            if (region.getMemStoreDataSize() <= 0) {
+              throw new IOException("memstore size=" + region.getMemStoreDataSize());
             }
             region.flush(false);
           } catch (IOException e) {
@@ -308,6 +309,141 @@ public class TestWALLockup {
     }
   }
 
+  /**
+   *
+   * If below is broken, we will see this test timeout because RingBufferEventHandler was stuck in
+   * attainSafePoint. Everyone will wait for sync to finish forever. See HBASE-14317.
+   */
+  @Test
+  public void testRingBufferEventHandlerStuckWhenSyncFailed()
+    throws IOException, InterruptedException {
+
+    // A WAL that we can have throw exceptions and slow FSHLog.replaceWriter down
+    class DodgyFSLog extends FSHLog {
+
+      private volatile boolean zigZagCreated = false;
+
+      public DodgyFSLog(FileSystem fs, Path root, String logDir, Configuration conf)
+        throws IOException {
+        super(fs, root, logDir, conf);
+      }
+
+      @Override
+      protected void afterCreatingZigZagLatch() {
+        zigZagCreated = true;
+        // Sleep a while to wait for RingBufferEventHandler to get stuck first.
+        try {
+          Thread.sleep(3000);
+        } catch (InterruptedException ignore) {
+        }
+      }
+
+      @Override
+      protected long getSequenceOnRingBuffer() {
+        return super.getSequenceOnRingBuffer();
+      }
+
+      protected void publishSyncOnRingBufferAndBlock(long sequence) {
+        try {
+          super.blockOnSync(super.publishSyncOnRingBuffer(sequence, false));
+          Assert.fail("Expect an IOException here.");
+        } catch (IOException ignore) {
+          // Here, we will get an IOException.
+        }
+      }
+
+      @Override
+      protected Writer createWriterInstance(Path path) throws IOException {
+        final Writer w = super.createWriterInstance(path);
+        return new Writer() {
+          @Override
+          public void close() throws IOException {
+            w.close();
+          }
+
+          @Override
+          public void sync(boolean forceSync) throws IOException {
+            throw new IOException("FAKE! Failed to replace a bad datanode...SYNC");
+          }
+
+          @Override
+          public void append(Entry entry) throws IOException {
+            w.append(entry);
+          }
+
+          @Override
+          public long getLength() {
+            return w.getLength();
+          }
+        };
+      }
+    }
+
+    // Mocked up server and regionserver services. Needed below.
+    final Server server = Mockito.mock(Server.class);
+    Mockito.when(server.getConfiguration()).thenReturn(CONF);
+    Mockito.when(server.isStopped()).thenReturn(false);
+    Mockito.when(server.isAborted()).thenReturn(false);
+    RegionServerServices services = Mockito.mock(RegionServerServices.class);
+
+    // OK. Now I have my mocked up Server & RegionServerServices and dodgy WAL, go ahead with test.
+    FileSystem fs = FileSystem.get(CONF);
+    Path rootDir = new Path(dir + getName());
+    final DodgyFSLog dodgyWAL = new DodgyFSLog(fs, rootDir, getName(), CONF);
+    dodgyWAL.init();
+    // I need a log roller running.
+    LogRoller logRoller = new LogRoller(server, services);
+    logRoller.addWAL(dodgyWAL);
+    // There is no 'stop' once a logRoller is running.. it just dies.
+    logRoller.start();
+
+    try {
+      final long seqForSync = dodgyWAL.getSequenceOnRingBuffer();
+
+      // This call provokes a WAL roll, and we will get a new RingBufferEventHandler.ZigZagLatch
+      // in LogRoller.
+      // After creating ZigZagLatch, RingBufferEventHandler would get stuck due to sync event,
+      // as long as HBASE-14317 hasn't be fixed.
+      LOG.info("Trigger log roll for creating a ZigZagLatch.");
+      logRoller.requestRollAll();
+
+      while (!dodgyWAL.zigZagCreated) {
+        Thread.sleep(10);
+      }
+
+      // Send a sync event for RingBufferEventHandler,
+      // and it gets blocked in RingBufferEventHandler.attainSafePoint
+      LOG.info("Send sync for RingBufferEventHandler");
+      Thread syncThread = new Thread() {
+        @Override
+        public void run() {
+          dodgyWAL.publishSyncOnRingBufferAndBlock(seqForSync);
+        }
+      };
+      // Sync in another thread to avoid reset SyncFuture again.
+      syncThread.start();
+      syncThread.join();
+
+      try {
+        LOG.info("Call sync for testing whether RingBufferEventHandler is hanging.");
+        dodgyWAL.sync(false); // Should not get a hang here, otherwise we will see timeout in this test.
+        Assert.fail("Expect an IOException here.");
+      } catch (IOException ignore) {
+      }
+
+    } finally {
+      // To stop logRoller, its server has to say it is stopped.
+      Mockito.when(server.isStopped()).thenReturn(true);
+      if (logRoller != null) {
+        logRoller.close();
+      }
+      if (dodgyWAL != null) {
+        dodgyWAL.close();
+      }
+    }
+  }
+
+
   static class DummyServer implements Server {
     private Configuration conf;
     private String serverName;
@@ -335,11 +471,6 @@ public class TestWALLockup {
 
     @Override
     public ClusterConnection getConnection() {
-      return null;
-    }
-
-    @Override
-    public MetaTableLocator getMetaTableLocator() {
       return null;
     }
 

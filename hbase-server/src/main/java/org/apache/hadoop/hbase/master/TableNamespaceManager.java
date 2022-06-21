@@ -46,6 +46,7 @@ import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.constraint.ConstraintException;
 import org.apache.hadoop.hbase.exceptions.TimeoutIOException;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
+import org.apache.hadoop.hbase.master.procedure.ProcedurePrepareLatch;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
@@ -159,7 +160,7 @@ public class TableNamespaceManager implements Stoppable {
           .setRow(row)
           .setFamily(TableDescriptorBuilder.NAMESPACE_FAMILY_INFO_BYTES)
           .setQualifier(TableDescriptorBuilder.NAMESPACE_COL_DESC_BYTES)
-          .setTimestamp(p.getTimeStamp())
+          .setTimestamp(p.getTimestamp())
           .setType(Cell.Type.Put)
           .setValue(ProtobufUtil.toProtoNamespaceDescriptor(ns).toByteArray())
           .build());
@@ -228,7 +229,7 @@ public class TableNamespaceManager implements Stoppable {
   private void blockingCreateNamespace(final NamespaceDescriptor namespaceDescriptor)
       throws IOException {
     ClusterSchema clusterSchema = this.masterServices.getClusterSchema();
-    long procId = clusterSchema.createNamespace(namespaceDescriptor, null);
+    long procId = clusterSchema.createNamespace(namespaceDescriptor, null, ProcedurePrepareLatch.getNoopLatch());
     block(this.masterServices, procId);
   }
 
@@ -314,12 +315,12 @@ public class TableNamespaceManager implements Stoppable {
     return false;
   }
 
-  private TableState.State getTableState() throws IOException {
+  private TableState getTableState() throws IOException {
     return masterServices.getTableStateManager().getTableState(TableName.NAMESPACE_TABLE_NAME);
   }
 
   private boolean isTableEnabled() throws IOException {
-    return getTableState().equals(TableState.State.ENABLED);
+    return getTableState().isEnabled();
   }
 
   private boolean isTableAssigned() {
@@ -382,12 +383,16 @@ public class TableNamespaceManager implements Stoppable {
       return;
     }
     try {
-      this.zkNamespaceManager.stop();
+      if (this.zkNamespaceManager != null) {
+        this.zkNamespaceManager.stop();
+      }
     } catch (IOException ioe) {
       LOG.warn("Failed NamespaceManager close", ioe);
     }
     try {
-      this.nsTable.close();
+      if (this.nsTable != null) {
+        this.nsTable.close();
+      }
     } catch (IOException ioe) {
       LOG.warn("Failed Namespace Table close", ioe);
     }

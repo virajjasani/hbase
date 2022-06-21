@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase.filter;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.TreeSet;
 
 import org.apache.hadoop.hbase.Cell;
@@ -37,8 +38,9 @@ import org.apache.hbase.thirdparty.com.google.protobuf.InvalidProtocolBufferExce
  * <p>
  * Note: Use of this filter overrides any time range/time stamp
  * options specified using {@link org.apache.hadoop.hbase.client.Get#setTimeRange(long, long)},
- * {@link org.apache.hadoop.hbase.client.Scan#setTimeRange(long, long)}, {@link org.apache.hadoop.hbase.client.Get#setTimeStamp(long)},
- * or {@link org.apache.hadoop.hbase.client.Scan#setTimeStamp(long)}.
+ * {@link org.apache.hadoop.hbase.client.Scan#setTimeRange(long, long)},
+ * {@link org.apache.hadoop.hbase.client.Get#setTimestamp(long)},
+ * or {@link org.apache.hadoop.hbase.client.Scan#setTimestamp(long)}.
  */
 @InterfaceAudience.Public
 public class TimestampsFilter extends FilterBase {
@@ -48,8 +50,8 @@ public class TimestampsFilter extends FilterBase {
   private static final int MAX_LOG_TIMESTAMPS = 5;
 
   // Used during scans to hint the scan to stop early
-  // once the timestamps fall below the minTimeStamp.
-  long minTimeStamp = Long.MAX_VALUE;
+  // once the timestamps fall below the minTimestamp.
+  long minTimestamp = Long.MAX_VALUE;
 
   /**
    * Constructor for filter that retains only the specified timestamps in the list.
@@ -90,7 +92,7 @@ public class TimestampsFilter extends FilterBase {
 
   private void init() {
     if (this.timestamps.size() > 0) {
-      minTimeStamp = this.timestamps.first();
+      minTimestamp = this.timestamps.first();
     }
   }
 
@@ -99,7 +101,7 @@ public class TimestampsFilter extends FilterBase {
    * @return  minimum timestamp requested by filter.
    */
   public long getMin() {
-    return minTimeStamp;
+    return minTimestamp;
   }
 
   @Override
@@ -118,7 +120,7 @@ public class TimestampsFilter extends FilterBase {
   public ReturnCode filterCell(final Cell c) {
     if (this.timestamps.contains(c.getTimestamp())) {
       return ReturnCode.INCLUDE;
-    } else if (c.getTimestamp() < minTimeStamp) {
+    } else if (c.getTimestamp() < minTimestamp) {
       // The remaining versions of this column are guaranteed
       // to be lesser than all of the other values.
       return ReturnCode.NEXT_COL;
@@ -236,5 +238,15 @@ public class TimestampsFilter extends FilterBase {
 
     return String.format("%s (%d/%d): [%s] canHint: [%b]", this.getClass().getSimpleName(),
         count, this.timestamps.size(), tsList.toString(), canHint);
+  }
+
+  @Override
+  public boolean equals(Object obj) {
+    return obj instanceof Filter && areSerializedFieldsEqual((Filter) obj);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(getTimestamps());
   }
 }

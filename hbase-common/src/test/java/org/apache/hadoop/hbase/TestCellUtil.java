@@ -180,6 +180,11 @@ public class TestCellUtil {
     }
 
     @Override
+    public int getSerializedSize() {
+      return 0;
+    }
+
+    @Override
     public byte[] getTagsArray() {
       // TODO Auto-generated method stub
       return null;
@@ -200,6 +205,11 @@ public class TestCellUtil {
     @Override
     public int getTagsLength() {
       // TODO Auto-generated method stub
+      return 0;
+    }
+
+    @Override
+    public long heapSize() {
       return 0;
     }
   }
@@ -524,11 +534,16 @@ public class TestCellUtil {
     assertTrue(CellUtil.equals(kv, res));
   }
 
+  // Workaround for jdk 11 - reflective access to interface default methods for testGetType
+  private abstract class CellForMockito implements Cell {
+
+  }
+
   @Test
   public void testGetType() throws IOException {
-    Cell c = Mockito.mock(Cell.class);
+    CellForMockito c = Mockito.mock(CellForMockito.class);
     Mockito.when(c.getType()).thenCallRealMethod();
-    for (Cell.Type type : Cell.Type.values()) {
+    for (CellForMockito.Type type : CellForMockito.Type.values()) {
       Mockito.when(c.getTypeByte()).thenReturn(type.getCode());
       assertEquals(type, c.getType());
     }
@@ -631,6 +646,11 @@ public class TestCellUtil {
     }
 
     @Override
+    public int getSerializedSize() {
+      return this.kv.getSerializedSize();
+    }
+
+    @Override
     public byte[] getTagsArray() {
       return this.kv.getTagsArray();
     }
@@ -643,6 +663,11 @@ public class TestCellUtil {
     @Override
     public int getTagsLength() {
       return this.kv.getTagsLength();
+    }
+
+    @Override
+    public long heapSize() {
+      return this.kv.heapSize();
     }
   }
 }

@@ -1,5 +1,4 @@
 /**
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -16,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase.regionserver;
 
 import java.io.FileNotFoundException;
@@ -25,8 +23,10 @@ import java.io.InterruptedIOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -84,6 +84,7 @@ public class HRegionFileSystem {
   private final Configuration conf;
   private final Path tableDir;
   private final FileSystem fs;
+  private final Path regionDir;
 
   /**
    * In order to handle NN connectivity hiccups, one need to retry non-idempotent operation at the
@@ -105,9 +106,10 @@ public class HRegionFileSystem {
       final RegionInfo regionInfo) {
     this.fs = fs;
     this.conf = conf;
-    this.tableDir = tableDir;
-    this.regionInfo = regionInfo;
+    this.tableDir = Objects.requireNonNull(tableDir, "tableDir is null");
+    this.regionInfo = Objects.requireNonNull(regionInfo, "regionInfo is null");
     this.regionInfoForFs = ServerRegionReplicaUtil.getRegionInfoForFs(regionInfo);
+    this.regionDir = FSUtils.getRegionDirFromTableDir(tableDir, regionInfo);
     this.hdfsClientRetriesNumber = conf.getInt("hdfs.client.retries.number",
       DEFAULT_HDFS_CLIENT_RETRIES_NUMBER);
     this.baseSleepBeforeRetries = conf.getInt("hdfs.client.sleep.before.retries",
@@ -135,7 +137,7 @@ public class HRegionFileSystem {
 
   /** @return {@link Path} to the region directory. */
   public Path getRegionDir() {
-    return new Path(this.tableDir, this.regionInfoForFs.getEncodedName());
+    return regionDir;
   }
 
   // ===========================================================================
@@ -324,8 +326,8 @@ public class HRegionFileSystem {
         if(stat.isDirectory()) {
           continue;
         }
-        if(StoreFileInfo.isReference(stat.getPath())) {
-          if (LOG.isTraceEnabled()) LOG.trace("Reference " + stat.getPath());
+        if (StoreFileInfo.isReference(stat.getPath())) {
+          LOG.trace("Reference {}", stat.getPath());
           return true;
         }
       }
@@ -460,7 +462,7 @@ public class HRegionFileSystem {
       throw new FileNotFoundException(buildPath.toString());
     }
     if (LOG.isDebugEnabled()) {
-      LOG.debug("Committing store file " + buildPath + " as " + dstPath);
+      LOG.debug("Committing " + buildPath + " as " + dstPath);
     }
     return dstPath;
   }
@@ -629,18 +631,25 @@ public class HRegionFileSystem {
   /**
    * Create the region splits directory.
    */
-  public void createSplitsDir() throws IOException {
+  public void createSplitsDir(RegionInfo daughterA, RegionInfo daughterB) throws IOException {
     Path splitdir = getSplitsDir();
     if (fs.exists(splitdir)) {
       LOG.info("The " + splitdir + " directory exists.  Hence deleting it to recreate it");
       if (!deleteDir(splitdir)) {
-        throw new IOException("Failed deletion of " + splitdir
-            + " before creating them again.");
+        throw new IOException("Failed deletion of " + splitdir + " before creating them again.");
       }
     }
     // splitDir doesn't exists now. No need to do an exists() call for it.
     if (!createDir(splitdir)) {
       throw new IOException("Failed create of " + splitdir);
+    }
+    Path daughterATmpDir = getSplitsDir(daughterA);
+    if (!createDir(daughterATmpDir)) {
+      throw new IOException("Failed create of " + daughterATmpDir);
+    }
+    Path daughterBTmpDir = getSplitsDir(daughterB);
+    if (!createDir(daughterBTmpDir)) {
+      throw new IOException("Failed create of " + daughterBTmpDir);
     }
   }
 
@@ -749,22 +758,22 @@ public class HRegionFileSystem {
   }
 
   /**
-   * Create the region merges directory.
+   * Create the region merges directory, a temporary directory to accumulate
+   * merges in.
    * @throws IOException If merges dir already exists or we fail to create it.
    * @see HRegionFileSystem#cleanupMergesDir()
    */
   public void createMergesDir() throws IOException {
     Path mergesdir = getMergesDir();
     if (fs.exists(mergesdir)) {
-      LOG.info("The " + mergesdir
-          + " directory exists.  Hence deleting it to recreate it");
+      LOG.info("{} directory exists. Deleting it to recreate it anew", mergesdir);
       if (!fs.delete(mergesdir, true)) {
-        throw new IOException("Failed deletion of " + mergesdir
-            + " before creating them again.");
+        throw new IOException("Failed deletion of " + mergesdir + " before recreate.");
       }
     }
-    if (!mkdirs(fs, conf, mergesdir))
+    if (!mkdirs(fs, conf, mergesdir)) {
       throw new IOException("Failed create of " + mergesdir);
+    }
   }
 
   /**
@@ -804,7 +813,7 @@ public class HRegionFileSystem {
   public void commitMergedRegion(final RegionInfo mergedRegionInfo) throws IOException {
     Path regionDir = new Path(this.tableDir, mergedRegionInfo.getEncodedName());
     Path mergedRegionTmpDir = this.getMergesDir(mergedRegionInfo);
-    // Move the tmp dir in the expected location
+    // Move the tmp dir to the expected location
     if (mergedRegionTmpDir != null && fs.exists(mergedRegionTmpDir)) {
       if (!fs.rename(mergedRegionTmpDir, regionDir)) {
         throw new IOException("Unable to rename " + mergedRegionTmpDir + " to "
@@ -853,6 +862,7 @@ public class HRegionFileSystem {
 
   /**
    * Write the .regioninfo file on-disk.
+   * Overwrites if exists already.
    */
   private static void writeRegionInfoFileContent(final Configuration conf, final FileSystem fs,
       final Path regionInfoFile, final byte[] content) throws IOException {
@@ -969,22 +979,21 @@ public class HRegionFileSystem {
   public static HRegionFileSystem createRegionOnFileSystem(final Configuration conf,
       final FileSystem fs, final Path tableDir, final RegionInfo regionInfo) throws IOException {
     HRegionFileSystem regionFs = new HRegionFileSystem(conf, fs, tableDir, regionInfo);
-    Path regionDir = regionFs.getRegionDir();
 
-    if (fs.exists(regionDir)) {
-      LOG.warn("Trying to create a region that already exists on disk: " + regionDir);
-      throw new IOException("The specified region already exists on disk: " + regionDir);
-    }
-
-    // Create the region directory
-    if (!createDirOnFileSystem(fs, conf, regionDir)) {
-      LOG.warn("Unable to create the region directory: " + regionDir);
-      throw new IOException("Unable to create region directory: " + regionDir);
-    }
-
-    // Write HRI to a file in case we need to recover hbase:meta
-    // Only primary replicas should write region info
+    // We only create a .regioninfo and the region directory if this is the default region replica
     if (regionInfo.getReplicaId() == RegionInfo.DEFAULT_REPLICA_ID) {
+      Path regionDir = regionFs.getRegionDir();
+      if (fs.exists(regionDir)) {
+        LOG.warn("Trying to create a region that already exists on disk: " + regionDir);
+      } else {
+        // Create the region directory
+        if (!createDirOnFileSystem(fs, conf, regionDir)) {
+          LOG.warn("Unable to create the region directory: " + regionDir);
+          throw new IOException("Unable to create region directory: " + regionDir);
+        }
+      }
+
+      // Write HRI to a file in case we need to recover hbase:meta
       regionFs.writeRegionInfoOnFilesystem(false);
     } else {
       if (LOG.isDebugEnabled())

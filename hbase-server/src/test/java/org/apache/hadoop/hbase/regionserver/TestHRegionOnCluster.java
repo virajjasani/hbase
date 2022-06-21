@@ -70,10 +70,9 @@ public class TestHRegionOnCluster {
 
   @Test
   public void testDataCorrectnessReplayingRecoveredEdits() throws Exception {
-    final int NUM_MASTERS = 1;
     final int NUM_RS = 3;
     Admin hbaseAdmin = null;
-    TEST_UTIL.startMiniCluster(NUM_MASTERS, NUM_RS);
+    TEST_UTIL.startMiniCluster(NUM_RS);
 
     try {
       final TableName tableName = TableName.valueOf(name.getMethodName());
@@ -110,8 +109,7 @@ public class TestHRegionOnCluster {
 
       TEST_UTIL.waitUntilAllRegionsAssigned(table.getName());
       LOG.info("Moving " + regionInfo.getEncodedName() + " to " + targetServer.getServerName());
-      hbaseAdmin.move(regionInfo.getEncodedNameAsBytes(),
-          Bytes.toBytes(targetServer.getServerName().getServerName()));
+      hbaseAdmin.move(regionInfo.getEncodedNameAsBytes(), targetServer.getServerName());
       do {
         Thread.sleep(1);
       } while (cluster.getServerWith(regionInfo.getRegionName()) == originServerNum);
@@ -123,8 +121,7 @@ public class TestHRegionOnCluster {
       TEST_UTIL.waitUntilAllRegionsAssigned(table.getName());
       // Move region to origin server
       LOG.info("Moving " + regionInfo.getEncodedName() + " to " + originServer.getServerName());
-      hbaseAdmin.move(regionInfo.getEncodedNameAsBytes(),
-          Bytes.toBytes(originServer.getServerName().getServerName()));
+      hbaseAdmin.move(regionInfo.getEncodedNameAsBytes(), originServer.getServerName());
       do {
         Thread.sleep(1);
       } while (cluster.getServerWith(regionInfo.getRegionName()) == targetServerNum);

@@ -17,7 +17,7 @@
  */
 package org.apache.hadoop.hbase.net;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.yetus.audience.InterfaceAudience;
 
 import org.apache.hbase.thirdparty.com.google.common.net.HostAndPort;
@@ -26,7 +26,7 @@ import org.apache.hbase.thirdparty.com.google.common.net.HostAndPort;
  * An immutable type to hold a hostname and port combo, like an Endpoint
  * or java.net.InetSocketAddress (but without danger of our calling
  * resolve -- we do NOT want a resolve happening every time we want
- * to hold a hostname and port combo). This class is also <<Comparable>>.
+ * to hold a hostname and port combo). This class is also {@link Comparable}
  * <p>In implementation this class is a facade over Guava's {@link HostAndPort}.
  * We cannot have Guava classes in our API hence this Type.
  */

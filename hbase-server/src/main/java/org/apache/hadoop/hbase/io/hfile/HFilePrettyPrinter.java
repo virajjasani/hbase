@@ -37,14 +37,6 @@ import java.util.SortedMap;
 import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.CommandLineParser;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.OptionGroup;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
-import org.apache.commons.cli.PosixParser;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
@@ -79,6 +71,15 @@ import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLine;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLineParser;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.HelpFormatter;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.Option;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.OptionGroup;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.Options;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.ParseException;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.PosixParser;
 
 import com.codahale.metrics.ConsoleReporter;
 import com.codahale.metrics.Counter;
@@ -173,7 +174,7 @@ public class HFilePrettyPrinter extends Configured implements Tool {
       IOException {
     if (args.length == 0) {
       HelpFormatter formatter = new HelpFormatter();
-      formatter.printHelp("HFile", options, true);
+      formatter.printHelp("hfile", options, true);
       return false;
     }
     CommandLineParser parser = new PosixParser();
@@ -266,7 +267,7 @@ public class HFilePrettyPrinter extends Configured implements Tool {
     // iterate over all files found
     for (Path fileName : files) {
       try {
-        int exitCode = processFile(fileName);
+        int exitCode = processFile(fileName, false);
         if (exitCode != 0) {
           return exitCode;
         }
@@ -283,22 +284,26 @@ public class HFilePrettyPrinter extends Configured implements Tool {
     return 0;
   }
 
-  public int processFile(Path file) throws IOException {
-    if (verbose)
+  // HBASE-22561 introduces boolean checkRootDir for WebUI specificly
+  public int processFile(Path file, boolean checkRootDir) throws IOException {
+    if (verbose) {
       out.println("Scanning -> " + file);
+    }
 
-    Path rootPath = FSUtils.getRootDir(getConf());
-    String rootString = rootPath + rootPath.SEPARATOR;
-    if (!file.toString().startsWith(rootString)) {
-      // First we see if fully-qualified URI matches the root dir. It might
-      // also be an absolute path in the same filesystem, so we prepend the FS
-      // of the root dir and see if that fully-qualified URI matches.
-      FileSystem rootFS = rootPath.getFileSystem(getConf());
-      String qualifiedFile = rootFS.getUri().toString() + file.toString();
-      if (!qualifiedFile.startsWith(rootString)) {
-        err.println("ERROR, file (" + file +
-            ") is not in HBase's root directory (" + rootString + ")");
-        return -2;
+    if (checkRootDir) {
+      Path rootPath = FSUtils.getRootDir(getConf());
+      String rootString = rootPath + rootPath.SEPARATOR;
+      if (!file.toString().startsWith(rootString)) {
+        // First we see if fully-qualified URI matches the root dir. It might
+        // also be an absolute path in the same filesystem, so we prepend the FS
+        // of the root dir and see if that fully-qualified URI matches.
+        FileSystem rootFS = rootPath.getFileSystem(getConf());
+        String qualifiedFile = rootFS.getUri().toString() + file.toString();
+        if (!qualifiedFile.startsWith(rootString)) {
+          err.println(
+            "ERROR, file (" + file + ") is not in HBase's root directory (" + rootString + ")");
+          return -2;
+        }
       }
     }
 
@@ -308,7 +313,7 @@ public class HFilePrettyPrinter extends Configured implements Tool {
       return -2;
     }
 
-    HFile.Reader reader = HFile.createReader(fs, file, new CacheConfig(getConf()), true, getConf());
+    HFile.Reader reader = HFile.createReader(fs, file, CacheConfig.DISABLED, true, getConf());
 
     Map<byte[], byte[]> fileInfo = reader.loadFileInfo();
 
@@ -621,7 +626,7 @@ public class HFilePrettyPrinter extends Configured implements Tool {
         // new row
         collectRow();
       }
-      curRowBytes += KeyValueUtil.length(cell);
+      curRowBytes += cell.getSerializedSize();
       curRowKeyLength = KeyValueUtil.keyLength(cell);
       curRowCols++;
       prevCell = cell;

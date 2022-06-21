@@ -20,7 +20,6 @@ package org.apache.hadoop.hbase.http.jmx;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.lang.management.ManagementFactory;
-
 import javax.management.MBeanServer;
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
@@ -30,9 +29,9 @@ import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-
 import org.apache.hadoop.hbase.http.HttpServer;
 import org.apache.hadoop.hbase.util.JSONBean;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -110,6 +109,7 @@ import org.slf4j.LoggerFactory;
  * </p>
  *
  */
+@InterfaceAudience.Private
 public class JMXJsonServlet extends HttpServlet {
   private static final Logger LOG = LoggerFactory.getLogger(JMXJsonServlet.class);
 
@@ -119,7 +119,7 @@ public class JMXJsonServlet extends HttpServlet {
   /**
    * If query string includes 'description', then we will emit bean and attribute descriptions to
    * output IFF they are not null and IFF the description is not the same as the attribute name:
-   * i.e. specify an URL like so: /jmx?description=true
+   * i.e. specify a URL like so: /jmx?description=true
    */
   private static final String INCLUDE_DESCRIPTION = "description";
 
@@ -160,7 +160,6 @@ public class JMXJsonServlet extends HttpServlet {
       try {
         jsonpcb = checkCallbackName(request.getParameter(CALLBACK_PARAM));
         writer = response.getWriter();
-        beanWriter = this.jsonBeanWriter.open(writer);
 
         // "callback" parameter implies JSONP outpout
         if (jsonpcb != null) {
@@ -169,6 +168,7 @@ public class JMXJsonServlet extends HttpServlet {
         } else {
           response.setContentType("application/json; charset=utf8");
         }
+        beanWriter = this.jsonBeanWriter.open(writer);
         // Should we output description on each attribute and bean?
         String tmpStr = request.getParameter(INCLUDE_DESCRIPTION);
         boolean description = tmpStr != null && tmpStr.length() > 0;
@@ -202,9 +202,11 @@ public class JMXJsonServlet extends HttpServlet {
           response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
         }
       } finally {
-        if (beanWriter != null) beanWriter.close();
+        if (beanWriter != null) {
+          beanWriter.close();
+        }
         if (jsonpcb != null) {
-           writer.write(");");
+          writer.write(");");
         }
         if (writer != null) {
           writer.close();

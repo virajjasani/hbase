@@ -28,6 +28,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -54,9 +55,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
-
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 
 /**
  * The context, and return value, for a single submit/submitAll call.
@@ -97,7 +95,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
         try {
           done = waitUntilDone(startTime * 1000L + asyncProcess.primaryCallTimeoutMicroseconds);
         } catch (InterruptedException ex) {
-          LOG.error("Replica thread was interrupted - no replica calls: " + ex.getMessage());
+          LOG.error("Replica thread interrupted - no replica calls {}", ex.getMessage());
           return;
         }
       }
@@ -141,7 +139,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
       if (loc == null) return;
       HRegionLocation[] locs = loc.getRegionLocations();
       if (locs.length == 1) {
-        LOG.warn("No replicas found for " + action.getAction());
+        LOG.warn("No replicas found for {}", action.getAction());
         return;
       }
       synchronized (replicaResultLock) {
@@ -222,8 +220,8 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
           return;
         } catch (Throwable t) {
           // This should not happen. Let's log & retry anyway.
-          LOG.error("#" + asyncProcess.id + ", Caught throwable while calling. This is unexpected." +
-              " Retrying. Server is " + server + ", tableName=" + tableName, t);
+          LOG.error("id=" + asyncProcess.id + ", caught throwable. Unexpected." +
+              " Retrying. Server=" + server + ", tableName=" + tableName, t);
           receiveGlobalFailure(multiAction, server, numAttempt, t);
           return;
         }
@@ -239,8 +237,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
         }
       } catch (Throwable t) {
         // Something really bad happened. We are on the send thread that will now die.
-        LOG.error("Internal AsyncProcess #" + asyncProcess.id + " error for "
-            + tableName + " processing for " + server, t);
+        LOG.error("id=" + asyncProcess.id + " error for " + tableName + " processing " + server, t);
         throw new RuntimeException(t);
       } finally {
         asyncProcess.decTaskCounters(multiAction.getRegions(), server);
@@ -388,8 +385,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
             new ConcurrentHashMap<CancellableRegionServerCallable, Boolean>());
     this.asyncProcess = asyncProcess;
     this.errorsByServer = createServerErrorTracker();
-    this.errors = (asyncProcess.globalErrors != null)
-        ? asyncProcess.globalErrors : new BatchErrors();
+    this.errors = new BatchErrors();
     this.operationTimeout = task.getOperationTimeout();
     this.rpcTimeout = task.getRpcTimeout();
     this.currentCallable = task.getCallable();
@@ -551,8 +547,8 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
             if (t instanceof RejectedExecutionException) {
               // This should never happen. But as the pool is provided by the end user,
               // let's secure this a little.
-              LOG.warn("#" + asyncProcess.id + ", the task was rejected by the pool. This is unexpected." +
-                  " Server is " + server.getServerName(), t);
+              LOG.warn("id=" + asyncProcess.id + ", task rejected by pool. Unexpected." +
+                  " Server=" + server.getServerName(), t);
             } else {
               // see #HBASE-14359 for more details
               LOG.warn("Caught unexpected exception/error: ", t);
@@ -616,8 +612,8 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
         traceText = "AsyncProcess.clientBackoff.sendMultiAction";
         runnable = runner;
         if (asyncProcess.connection.getConnectionMetrics() != null) {
-          asyncProcess.connection.getConnectionMetrics().incrDelayRunners();
-          asyncProcess.connection.getConnectionMetrics().updateDelayInterval(runner.getSleepTime());
+          asyncProcess.connection.getConnectionMetrics()
+            .incrDelayRunnersAndUpdateDelayInterval(runner.getSleepTime());
         }
       } else {
         if (asyncProcess.connection.getConnectionMetrics() != null) {
@@ -660,7 +656,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
       try {
         pool.submit(replicaRunnable);
       } catch (RejectedExecutionException ree) {
-        LOG.warn("#" + asyncProcess.id + ", replica task was rejected by the pool - no replica calls", ree);
+        LOG.warn("id=" + asyncProcess.id + " replica task rejected by pool; no replica calls", ree);
       }
     }
   }
@@ -804,19 +800,16 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
    * @param responses      - the response, if any
    * @param numAttempt     - the attempt
    */
-  private void receiveMultiAction(MultiAction multiAction,
-                                  ServerName server, MultiResponse responses, int numAttempt) {
+  private void receiveMultiAction(MultiAction multiAction, ServerName server,
+      MultiResponse responses, int numAttempt) {
     assert responses != null;
-
-    Map<byte[], MultiResponse.RegionResult> results = responses.getResults();
-    updateStats(server, results);
-
+    updateStats(server, responses);
     // Success or partial success
     // Analyze detailed results. We can still have individual failures to be redo.
     // two specific throwables are managed:
     //  - DoNotRetryIOException: we continue to retry for other actions
     //  - RegionMovedException: we update the cache with the new region location
-
+    Map<byte[], MultiResponse.RegionResult> results = responses.getResults();
     List<Action> toReplay = new ArrayList<>();
     Throwable lastException = null;
     int failureCount = 0;
@@ -828,7 +821,9 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
       byte[] regionName = regionEntry.getKey();
 
       Throwable regionException = responses.getExceptions().get(regionName);
-      cleanServerCache(server, regionException);
+      if (regionException != null) {
+        cleanServerCache(server, regionException);
+      }
 
       Map<Integer, Object> regionResults =
         results.containsKey(regionName) ? results.get(regionName).result : Collections.emptyMap();
@@ -918,35 +913,17 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
   }
 
   private void cleanServerCache(ServerName server, Throwable regionException) {
-    if (tableName == null && ClientExceptionsUtil.isMetaClearingException(regionException)) {
-      // For multi-actions, we don't have a table name, but we want to make sure to clear the
-      // cache in case there were location-related exceptions. We don't to clear the cache
-      // for every possible exception that comes through, however.
+    if (ClientExceptionsUtil.isMetaClearingException(regionException)) {
+      // We want to make sure to clear the cache in case there were location-related exceptions.
+      // We don't to clear the cache for every possible exception that comes through, however.
       asyncProcess.connection.clearCaches(server);
     }
   }
 
   @VisibleForTesting
-  protected void updateStats(ServerName server, Map<byte[], MultiResponse.RegionResult> results) {
-    boolean metrics = asyncProcess.connection.getConnectionMetrics() != null;
-    boolean stats = asyncProcess.connection.getStatisticsTracker() != null;
-    if (!stats && !metrics) {
-      return;
-    }
-    for (Map.Entry<byte[], MultiResponse.RegionResult> regionStats : results.entrySet()) {
-      byte[] regionName = regionStats.getKey();
-      ClientProtos.RegionLoadStats stat = regionStats.getValue().getStat();
-      if (stat == null) {
-        LOG.error("No ClientProtos.RegionLoadStats found for server=" + server
-          + ", region=" + Bytes.toStringBinary(regionName));
-        continue;
-      }
-      RegionLoadStats regionLoadstats = ProtobufUtil.createRegionLoadStats(stat);
-      ResultStatsUtil.updateStats(asyncProcess.connection.getStatisticsTracker(), server,
-          regionName, regionLoadstats);
-      ResultStatsUtil.updateStats(asyncProcess.connection.getConnectionMetrics(),
-          server, regionName, regionLoadstats);
-    }
+  protected void updateStats(ServerName server, MultiResponse resp) {
+    ConnectionUtils.updateStats(Optional.ofNullable(asyncProcess.connection.getStatisticsTracker()),
+      Optional.ofNullable(asyncProcess.connection.getConnectionMetrics()), server, resp);
   }
 
 
@@ -954,13 +931,13 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
                            Throwable error, long backOffTime, boolean willRetry, String startTime,
                            int failed, int stopped) {
     StringBuilder sb = new StringBuilder();
-    sb.append("id=").append(asyncProcess.id).append(", table=").append(tableName).append(", ")
-        .append("attempt=").append(numAttempt)
-        .append("/").append(asyncProcess.numTries).append(" ");
+    sb.append("id=").append(asyncProcess.id).append(", table=").append(tableName).
+        append(", attempt=").append(numAttempt).append("/").append(asyncProcess.numTries).
+        append(", ");
 
     if (failureCount > 0 || error != null){
-      sb.append("failed=").append(failureCount).append("ops").append(", last exception=").
-          append(error == null ? "null" : error);
+      sb.append("failureCount=").append(failureCount).append("ops").append(", last exception=").
+          append(error);
     } else {
       sb.append("succeeded");
     }
@@ -969,15 +946,15 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
 
     if (willRetry) {
       sb.append(", retrying after=").append(backOffTime).append("ms").
-          append(", replay=").append(replaySize).append("ops");
+          append(", operationsToReplay=").append(replaySize);
     } else if (failureCount > 0) {
       if (stopped > 0) {
-        sb.append("; not retrying ").append(stopped).append(" due to success from other replica");
+        sb.append("; NOT retrying, stopped=").append(stopped).
+            append(" because successful operation on other replica");
       }
       if (failed > 0) {
-        sb.append("; not retrying ").append(failed).append(" - final failure");
+        sb.append("; NOT retrying, failed=").append(failed).append(" -- final attempt!");
       }
-
     }
 
     return sb.toString();

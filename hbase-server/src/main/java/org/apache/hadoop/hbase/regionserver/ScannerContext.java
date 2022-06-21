@@ -99,6 +99,12 @@ public class ScannerContext {
 
   private Cell lastPeekedCell = null;
 
+  // Set this to true will have the same behavior with reaching the time limit.
+  // This is used when you want to make the current RSRpcService.scan returns immediately. For
+  // example, when we want to switch from pread to stream, we can only do it after the rpc call is
+  // returned.
+  private boolean returnImmediately;
+
   /**
    * Tracks the relevant server side metrics during scans. null when metrics should not be tracked
    */
@@ -118,7 +124,7 @@ public class ScannerContext {
     this.metrics = trackMetrics ? new ServerSideScanMetrics() : null;
   }
 
-  boolean isTrackingMetrics() {
+  public boolean isTrackingMetrics() {
     return this.metrics != null;
   }
 
@@ -127,7 +133,7 @@ public class ScannerContext {
    * has been made to confirm that metrics are indeed being tracked.
    * @return {@link ServerSideScanMetrics} instance that is tracking metrics for this scan
    */
-  ServerSideScanMetrics getMetrics() {
+  public ServerSideScanMetrics getMetrics() {
     assert isTrackingMetrics();
     return this.metrics;
   }
@@ -278,7 +284,8 @@ public class ScannerContext {
    * @return true if the time limit can be enforced in the checker's scope
    */
   boolean hasTimeLimit(LimitScope checkerScope) {
-    return limits.canEnforceTimeLimitFromScope(checkerScope) && limits.getTime() > 0;
+    return limits.canEnforceTimeLimitFromScope(checkerScope) &&
+      (limits.getTime() > 0 || returnImmediately);
   }
 
   /**
@@ -338,7 +345,8 @@ public class ScannerContext {
    * @return true when the limit is enforceable from the checker's scope and it has been reached
    */
   boolean checkTimeLimit(LimitScope checkerScope) {
-    return hasTimeLimit(checkerScope) && (System.currentTimeMillis() >= limits.getTime());
+    return hasTimeLimit(checkerScope) &&
+      (returnImmediately || System.currentTimeMillis() >= limits.getTime());
   }
 
   /**
@@ -356,6 +364,10 @@ public class ScannerContext {
 
   void setLastPeekedCell(Cell lastPeekedCell) {
     this.lastPeekedCell = lastPeekedCell;
+  }
+
+  void returnImmediately() {
+    this.returnImmediately = true;
   }
 
   @Override
@@ -570,11 +582,6 @@ public class ScannerContext {
     LimitFields() {
     }
 
-    LimitFields(int batch, LimitScope sizeScope, long size, long heapSize, LimitScope timeScope,
-        long time) {
-      setFields(batch, sizeScope, size, heapSize, timeScope, time);
-    }
-
     void copy(LimitFields limitsToCopy) {
       if (limitsToCopy != null) {
         setFields(limitsToCopy.getBatch(), limitsToCopy.getSizeScope(), limitsToCopy.getDataSize(),
@@ -584,9 +591,6 @@ public class ScannerContext {
 
     /**
      * Set all fields together.
-     * @param batch
-     * @param sizeScope
-     * @param dataSize
      */
     void setFields(int batch, LimitScope sizeScope, long dataSize, long heapSize,
         LimitScope timeScope, long time) {
@@ -724,12 +728,6 @@ public class ScannerContext {
     // The sum of heap space occupied by all tracked cells. This includes Cell POJO's overhead as
     // such AND data cells of Cells which are in on heap area.
     long heapSize = DEFAULT_SIZE;
-
-    /**
-     * Fields keep their default values.
-     */
-    ProgressFields() {
-    }
 
     ProgressFields(int batch, long size, long heapSize) {
       setFields(batch, size, heapSize);

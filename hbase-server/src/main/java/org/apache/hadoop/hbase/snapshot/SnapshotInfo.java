@@ -32,8 +32,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.Option;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -49,6 +47,8 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLine;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.Option;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotRegionManifest;
@@ -614,7 +614,6 @@ public final class SnapshotInfo extends AbstractHBaseTool {
    * @param uniqueHFilesArchiveSize {@link AtomicLong} the accumulated store file size in archive
    * @param uniqueHFilesSize {@link AtomicLong} the accumulated store file size shared
    * @param uniqueHFilesMobSize {@link AtomicLong} the accumulated mob store file size shared
-   * @return the snapshot stats
    */
   private static void getSnapshotFilesMap(final Configuration conf,
       final SnapshotDescription snapshot, final ExecutorService exec,

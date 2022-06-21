@@ -60,6 +60,7 @@ import org.apache.hadoop.hbase.regionserver.MutableSegment;
 import org.apache.hadoop.hbase.regionserver.Segment;
 import org.apache.hadoop.hbase.regionserver.TimeRangeTracker.NonSyncTimeRangeTracker;
 import org.apache.hadoop.hbase.regionserver.TimeRangeTracker.SyncTimeRangeTracker;
+import org.apache.hadoop.hbase.regionserver.throttle.StoreHotnessProtector;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.ClassSize;
@@ -375,11 +376,13 @@ public class TestHeapSize  {
     expected += 2 * ClassSize.estimateBase(AtomicLong.class, false);
     expected += ClassSize.estimateBase(AtomicReference.class, false);
     expected += ClassSize.estimateBase(CellSet.class, false);
+    expected += ClassSize.estimateBase(ReentrantReadWriteLock.class, false);
     if (expected != actual) {
       ClassSize.estimateBase(cl, true);
       ClassSize.estimateBase(AtomicLong.class, true);
       ClassSize.estimateBase(AtomicReference.class, true);
       ClassSize.estimateBase(CellSet.class, true);
+      ClassSize.estimateBase(ReentrantReadWriteLock.class,true);
       assertEquals(expected, actual);
     }
 
@@ -390,16 +393,20 @@ public class TestHeapSize  {
     expected += 2 * ClassSize.estimateBase(AtomicLong.class, false);
     expected += ClassSize.estimateBase(AtomicReference.class, false);
     expected += ClassSize.estimateBase(CellSet.class, false);
+    expected += ClassSize.estimateBase(ReentrantReadWriteLock.class, false);
     expected += ClassSize.estimateBase(SyncTimeRangeTracker.class, false);
     expected += ClassSize.estimateBase(ConcurrentSkipListMap.class, false);
+    expected += ClassSize.estimateBase(AtomicBoolean.class, false);
     if (expected != actual) {
       ClassSize.estimateBase(cl, true);
       ClassSize.estimateBase(AtomicLong.class, true);
       ClassSize.estimateBase(AtomicLong.class, true);
       ClassSize.estimateBase(AtomicReference.class, true);
       ClassSize.estimateBase(CellSet.class, true);
+      ClassSize.estimateBase(ReentrantReadWriteLock.class,true);
       ClassSize.estimateBase(SyncTimeRangeTracker.class, true);
       ClassSize.estimateBase(ConcurrentSkipListMap.class, true);
+      ClassSize.estimateBase(AtomicBoolean.class,true);
       assertEquals(expected, actual);
     }
 
@@ -410,6 +417,7 @@ public class TestHeapSize  {
     expected += 2 * ClassSize.estimateBase(AtomicLong.class, false);
     expected += ClassSize.estimateBase(AtomicReference.class, false);
     expected += ClassSize.estimateBase(CellSet.class, false);
+    expected += ClassSize.estimateBase(ReentrantReadWriteLock.class, false);
     expected += ClassSize.estimateBase(NonSyncTimeRangeTracker.class, false);
     if (expected != actual) {
       ClassSize.estimateBase(cl, true);
@@ -417,6 +425,7 @@ public class TestHeapSize  {
       ClassSize.estimateBase(AtomicLong.class, true);
       ClassSize.estimateBase(AtomicReference.class, true);
       ClassSize.estimateBase(CellSet.class, true);
+      ClassSize.estimateBase(ReentrantReadWriteLock.class,true);
       ClassSize.estimateBase(NonSyncTimeRangeTracker.class, true);
       assertEquals(expected, actual);
     }
@@ -427,6 +436,7 @@ public class TestHeapSize  {
     expected += 2 * ClassSize.estimateBase(AtomicLong.class, false);
     expected += ClassSize.estimateBase(AtomicReference.class, false);
     expected += ClassSize.estimateBase(CellSet.class, false);
+    expected += ClassSize.estimateBase(ReentrantReadWriteLock.class, false);
     expected += ClassSize.estimateBase(NonSyncTimeRangeTracker.class, false);
     expected += ClassSize.estimateBase(ConcurrentSkipListMap.class, false);
     if (expected != actual) {
@@ -435,6 +445,7 @@ public class TestHeapSize  {
       ClassSize.estimateBase(AtomicLong.class, true);
       ClassSize.estimateBase(AtomicReference.class, true);
       ClassSize.estimateBase(CellSet.class, true);
+      ClassSize.estimateBase(ReentrantReadWriteLock.class,true);
       ClassSize.estimateBase(NonSyncTimeRangeTracker.class, true);
       ClassSize.estimateBase(ConcurrentSkipListMap.class, true);
       assertEquals(expected, actual);
@@ -445,6 +456,7 @@ public class TestHeapSize  {
     expected += 2 * ClassSize.estimateBase(AtomicLong.class, false);
     expected += ClassSize.estimateBase(AtomicReference.class, false);
     expected += ClassSize.estimateBase(CellSet.class, false);
+    expected += ClassSize.estimateBase(ReentrantReadWriteLock.class, false);
     expected += ClassSize.estimateBase(NonSyncTimeRangeTracker.class, false);
     expected += ClassSize.estimateBase(CellArrayMap.class, false);
     if (expected != actual) {
@@ -453,6 +465,7 @@ public class TestHeapSize  {
       ClassSize.estimateBase(AtomicLong.class, true);
       ClassSize.estimateBase(AtomicReference.class, true);
       ClassSize.estimateBase(CellSet.class, true);
+      ClassSize.estimateBase(ReentrantReadWriteLock.class,true);
       ClassSize.estimateBase(NonSyncTimeRangeTracker.class, true);
       ClassSize.estimateBase(CellArrayMap.class, true);
       assertEquals(expected, actual);
@@ -470,6 +483,14 @@ public class TestHeapSize  {
     // Region Overhead
     cl = HRegion.class;
     actual = HRegion.FIXED_OVERHEAD;
+    expected = ClassSize.estimateBase(cl, false);
+    if (expected != actual) {
+      ClassSize.estimateBase(cl, true);
+      assertEquals(expected, actual);
+    }
+
+    cl = StoreHotnessProtector.class;
+    actual = StoreHotnessProtector.FIXED_SIZE;
     expected = ClassSize.estimateBase(cl, false);
     if (expected != actual) {
       ClassSize.estimateBase(cl, true);

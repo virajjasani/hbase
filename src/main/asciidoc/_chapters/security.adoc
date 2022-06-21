@@ -30,7 +30,7 @@
 [IMPORTANT]
 .Reporting Security Bugs
 ====
-NOTE: To protect existing HBase installations from exploitation, please *do not* use JIRA to report security-related bugs. Instead, send your report to the mailing list private@apache.org, which allows anyone to send messages, but restricts who can read them. Someone on that list will contact you to follow up on your report.
+NOTE: To protect existing HBase installations from exploitation, please *do not* use JIRA to report security-related bugs. Instead, send your report to the mailing list private@hbase.apache.org, which allows anyone to send messages, but restricts who can read them. Someone on that list will contact you to follow up on your report.
 
 HBase adheres to the Apache Software Foundation's policy on reported vulnerabilities, available at http://apache.org/security/.
 
@@ -179,7 +179,25 @@ Add the following to the `hbase-site.xml` file on every client:
 </property>
 ----
 
-The client environment must be logged in to Kerberos from KDC or keytab via the `kinit` command before communication with the HBase cluster will be possible.
+Before 2.2.0 version, the client environment must be logged in to Kerberos from KDC or keytab via the `kinit` command before communication with the HBase cluster will be possible.
+
+Since 2.2.0, client can specify the following configurations in `hbase-site.xml`:
+[source,xml]
+----
+<property>
+  <name>hbase.client.keytab.file</name>
+  <value>/local/path/to/client/keytab</value>
+</property>
+
+<property>
+  <name>hbase.client.keytab.principal</name>
+  <value>foo@EXAMPLE.COM</value>
+</property>
+----
+Then application can automatically do the login and credential renewal jobs without client interference.
+
+It's optional feature, client, who upgrades to 2.2.0, can still keep their login and credential renewal logic already did in older version, as long as keeping `hbase.client.keytab.file`
+and `hbase.client.keytab.principal` are unset.
 
 Be advised that if the `hbase.security.authentication` in the client- and server-side site files do not match, the client will not be able to communicate with the cluster.
 
@@ -662,6 +680,7 @@ You also need to enable the DataBlockEncoder for the column family, for encoding
 You can enable compression of each tag in the WAL, if WAL compression is also enabled, by setting the value of `hbase.regionserver.wal.tags.enablecompression` to `true` in _hbase-site.xml_.
 Tag compression uses dictionary encoding.
 
+Coprocessors that run server-side on RegionServers can perform get and set operations on cell Tags. Tags are stripped out at the RPC layer before the read response is sent back, so clients do not see these tags.
 Tag compression is not supported when using WAL encryption.
 
 [[hbase.accesscontrol.configuration]]
@@ -1086,7 +1105,6 @@ public static void revokeFromTable(final HBaseTestingUtility util, final String 
 . Showing a User's Effective Permissions
 +
 .HBase Shell
-====
 ----
 hbase> user_permission 'user'
 
@@ -1094,7 +1112,6 @@ hbase> user_permission '.*'
 
 hbase> user_permission JAVA_REGEX
 ----
-====
 
 .API
 ====
@@ -1234,11 +1251,9 @@ Refer to the official API for usage instructions.
 . Define the List of Visibility Labels
 +
 .HBase Shell
-====
 ----
 hbase> add_labels [ 'admin', 'service', 'developer', 'test' ]
 ----
-====
 +
 .Java API
 ====
@@ -1265,23 +1280,21 @@ public static void addLabels() throws Exception {
 . Associate Labels with Users
 +
 .HBase Shell
-====
 ----
 hbase> set_auths 'service', [ 'service' ]
 ----
-
++
 ----
 hbase> set_auths 'testuser', [ 'test' ]
 ----
-
++
 ----
 hbase> set_auths 'qa', [ 'test', 'developer' ]
 ----
-
++
 ----
 hbase> set_auths '@qagroup', [ 'test' ]
 ----
-====
 +
 .Java API
 ====
@@ -1305,23 +1318,21 @@ public void testSetAndGetUserAuths() throws Throwable {
 . Clear Labels From Users
 +
 .HBase Shell
-====
 ----
 hbase> clear_auths 'service', [ 'service' ]
 ----
-
++
 ----
 hbase> clear_auths 'testuser', [ 'test' ]
 ----
-
++
 ----
 hbase> clear_auths 'qa', [ 'test', 'developer' ]
 ----
-
++
 ----
 hbase> clear_auths '@qagroup', [ 'test', 'developer' ]
 ----
-====
 +
 .Java API
 ====
@@ -1345,19 +1356,17 @@ The label is only applied when data is written.
 The label is associated with a given version of the cell.
 +
 .HBase Shell
-====
 ----
 hbase> set_visibility 'user', 'admin|service|developer', { COLUMNS => 'i' }
 ----
-
++
 ----
 hbase> set_visibility 'user', 'admin|service', { COLUMNS => 'pii' }
 ----
-
++
 ----
 hbase> set_visibility 'user', 'test', { COLUMNS => [ 'i', 'pii' ], FILTER => "(PrefixFilter ('test'))" }
 ----
-====
 +
 NOTE: HBase Shell support for applying labels or permissions to cells is for testing and verification support, and should not be employed for production use because it won't apply the labels to cells that don't exist yet.
 The correct way to apply cell level labels is to do so in the application code when storing the values.
@@ -1408,12 +1417,10 @@ set as an additional filter. It will further filter your results, rather than
 giving you additional authorization.
 
 .HBase Shell
-====
 ----
 hbase> get_auths 'myUser'
 hbase> scan 'table1', AUTHORIZATIONS => ['private']
 ----
-====
 
 .Java API
 ====
@@ -1732,7 +1739,7 @@ All options have been discussed separately in the sections above.
 <!-- HBase Superuser -->
 <property>
   <name>hbase.superuser</name>
-  <value>hbase, admin</value>
+  <value>hbase,admin</value>
 </property>
 <!-- Coprocessors for ACLs and Visibility Tags -->
 <property>
@@ -1752,8 +1759,7 @@ All options have been discussed separately in the sections above.
 </property>
 <property>
   <name>hbase.coprocessor.regionserver.classes</name>
-  <value>org.apache.hadoop/hbase.security.access.AccessController,
-  org.apache.hadoop.hbase.security.access.VisibilityController</value>
+  <value>org.apache.hadoop.hbase.security.access.AccessController</value>
 </property>
 <!-- Executable ACL for Coprocessor Endpoints -->
 <property>

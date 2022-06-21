@@ -21,7 +21,7 @@ function usage {
   echo "Usage: ${0} [options] /path/to/component/checkout"
   echo ""
   echo "    --intermediate-file-dir /path/to/use  Path for writing listings and diffs. must exist."
-  echo "                                          defaults to making a directory in /tmp."
+  echo "                                          defaults to making a directory via mktemp."
   echo "    --unpack-temp-dir /path/to/use        Path for unpacking tarball. default to"
   echo "                                          'unpacked_src_tarball' in intermediate directory."
   echo "    --maven-m2-initial /path/to/use       Path for maven artifacts while building in"
@@ -67,11 +67,10 @@ fi
 component_dir="$(cd "$(dirname "$1")"; pwd)/$(basename "$1")"
 
 if [ -z "${working_dir}" ]; then
-  working_dir=/tmp
-  while [[ -e ${working_dir} ]]; do
-    working_dir=/tmp/hbase-srctarball-test-${RANDOM}.${RANDOM}
-  done
-  mkdir "${working_dir}"
+  if ! working_dir="$(mktemp -d -t hbase-srctarball-test)" ; then
+    echo "Failed to create temporary working directory. Please specify via --unpack-temp-dir"
+    exit 1
+  fi
 else
   # absolutes please
   working_dir="$(cd "$(dirname "${working_dir}")"; pwd)/$(basename "${working_dir}")"
@@ -175,10 +174,16 @@ cd "${unpack_dir}"
 echo "Follow the ref guide section on making a RC: Step 8 Build the binary tarball."
 if mvn -DskipTests -Prelease --batch-mode -Dmaven.repo.local="${m2_tarbuild}" clean install \
     assembly:single >"${working_dir}/srctarball_install.log" 2>&1; then
-  echo "Building a binary tarball from the source tarball succeeded."
-else
-  echo "Building a binary tarball from the source tarball failed. see srtarball_install.log for details."
-  exit 1
+  for artifact in "${unpack_dir}"/hbase-assembly/target/hbase-*-bin.tar.gz; do
+    if [ -f "${artifact}" ]; then
+      # TODO check the layout of the binary artifact we just made.
+      echo "Building a binary tarball from the source tarball succeeded."
+      exit 0
+    fi
+  done
 fi
-
-# TODO check the layout of the binary artifact we just made.
+echo "Building a binary tarball from the source tarball failed. see srctarball_install.log for details."
+# Copy up the rat.txt to the working dir so available in build archive in case rat complaints.
+# rat.txt can be under any module target dir... copy them all up renaming them to include parent dir as we go.
+find ${unpack_dir} -name rat.txt -type f | while IFS= read -r NAME; do cp -v "$NAME" "${working_dir}/${NAME//\//_}"; done
+exit 1

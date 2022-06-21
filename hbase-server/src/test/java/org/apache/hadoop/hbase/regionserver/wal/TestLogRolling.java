@@ -90,7 +90,6 @@ public class TestLogRolling extends AbstractTestLogRolling {
     conf.setInt("hbase.regionserver.hlog.tolerable.lowreplication", 2);
     conf.setInt("hbase.regionserver.hlog.lowreplication.rolllimit", 3);
     conf.set(WALFactory.WAL_PROVIDER, "filesystem");
-    conf.set(WALFactory.META_WAL_PROVIDER, "filesystem");
     AbstractTestLogRolling.setUpBeforeClass();
   }
 
@@ -136,7 +135,7 @@ public class TestLogRolling extends AbstractTestLogRolling {
 
     // Create the test table and open it
     TableDescriptor desc = TableDescriptorBuilder.newBuilder(TableName.valueOf(getName()))
-        .addColumnFamily(ColumnFamilyDescriptorBuilder.of(HConstants.CATALOG_FAMILY)).build();
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.of(HConstants.CATALOG_FAMILY)).build();
 
     admin.createTable(desc);
     Table table = TEST_UTIL.getConnection().getTable(desc.getTableName());
@@ -244,7 +243,7 @@ public class TestLogRolling extends AbstractTestLogRolling {
 
       // Create the test table and open it
       TableDescriptor desc = TableDescriptorBuilder.newBuilder(TableName.valueOf(getName()))
-          .addColumnFamily(ColumnFamilyDescriptorBuilder.of(HConstants.CATALOG_FAMILY)).build();
+          .setColumnFamily(ColumnFamilyDescriptorBuilder.of(HConstants.CATALOG_FAMILY)).build();
 
       admin.createTable(desc);
       Table table = TEST_UTIL.getConnection().getTable(desc.getTableName());

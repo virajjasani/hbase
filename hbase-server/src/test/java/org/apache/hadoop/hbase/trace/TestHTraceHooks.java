@@ -25,6 +25,7 @@ import java.util.LinkedList;
 import java.util.List;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.StartMiniClusterOption;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Waiter;
 import org.apache.hadoop.hbase.client.Put;
@@ -38,6 +39,7 @@ import org.apache.htrace.core.TraceScope;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -45,6 +47,7 @@ import org.junit.rules.TestName;
 
 import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
 
+@Ignore // We don't support htrace in hbase-2.0.0 and this flakey is a little flakey.
 @Category({MiscTests.class, MediumTests.class})
 public class TestHTraceHooks {
 
@@ -61,7 +64,9 @@ public class TestHTraceHooks {
 
   @BeforeClass
   public static void before() throws Exception {
-    TEST_UTIL.startMiniCluster(2, 3);
+    StartMiniClusterOption option = StartMiniClusterOption.builder()
+        .numMasters(2).numRegionServers(3).numDataNodes(3).build();
+    TEST_UTIL.startMiniCluster(option);
     rcvr = new POJOSpanReceiver(new HBaseHTraceConfiguration(TEST_UTIL.getConfiguration()));
     TraceUtil.addReceiver(rcvr);
     TraceUtil.addSampler(new Sampler() {

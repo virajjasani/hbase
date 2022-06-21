@@ -20,7 +20,6 @@ package org.apache.hadoop.hbase.regionserver;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
-import java.util.UUID;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -28,6 +27,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.StartMiniClusterOption;
 import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.master.LoadBalancer;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
@@ -83,7 +83,9 @@ public class TestClusterId {
     //Make sure RS is in blocking state
     Thread.sleep(10000);
 
-    TEST_UTIL.startMiniHBaseCluster(1, 0);
+    StartMiniClusterOption option = StartMiniClusterOption.builder()
+        .numMasters(1).numRegionServers(0).build();
+    TEST_UTIL.startMiniHBaseCluster(option);
 
     rst.waitForServerOnline();
 
@@ -103,13 +105,13 @@ public class TestClusterId {
     FSDataOutputStream s = null;
     try {
       s = fs.create(filePath);
-      s.writeUTF(UUID.randomUUID().toString());
+      s.writeUTF(TEST_UTIL.getRandomUUID().toString());
     } finally {
       if (s != null) {
         s.close();
       }
     }
-    TEST_UTIL.startMiniHBaseCluster(1, 1);
+    TEST_UTIL.startMiniHBaseCluster();
     HMaster master = TEST_UTIL.getHBaseCluster().getMaster();
     int expected = LoadBalancer.isTablesOnMaster(TEST_UTIL.getConfiguration())? 2: 1;
     assertEquals(expected, master.getServerManager().getOnlineServersList().size());

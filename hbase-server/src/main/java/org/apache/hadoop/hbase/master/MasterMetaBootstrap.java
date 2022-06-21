@@ -20,15 +20,12 @@ package org.apache.hadoop.hbase.master;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.Set;
-
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.client.RegionReplicaUtil;
 import org.apache.hadoop.hbase.master.assignment.AssignmentManager;
-import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
 import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
@@ -41,35 +38,13 @@ import org.slf4j.LoggerFactory;
  * Used by the HMaster on startup to split meta logs and assign the meta table.
  */
 @InterfaceAudience.Private
-public class MasterMetaBootstrap {
+class MasterMetaBootstrap {
   private static final Logger LOG = LoggerFactory.getLogger(MasterMetaBootstrap.class);
 
-  private final MonitoredTask status;
   private final HMaster master;
 
-  public MasterMetaBootstrap(final HMaster master, final MonitoredTask status) {
+  public MasterMetaBootstrap(HMaster master) {
     this.master = master;
-    this.status = status;
-  }
-
-  public void recoverMeta() throws InterruptedException, IOException {
-    master.recoverMeta();
-    master.getTableStateManager().start();
-    enableCrashedServerProcessing(false);
-  }
-
-  public void processDeadServers() {
-    // get a list for previously failed RS which need log splitting work
-    // we recover hbase:meta region servers inside master initialization and
-    // handle other failed servers in SSH in order to start up master node ASAP
-    Set<ServerName> previouslyFailedServers =
-        master.getMasterWalManager().getFailedServersFromLogFolders();
-
-    // Master has recovered hbase:meta region server and we put
-    // other failed region servers in a queue to be handled later by SSH
-    for (ServerName tmpServer : previouslyFailedServers) {
-      master.getServerManager().processDeadServer(tmpServer, true);
-    }
   }
 
   /**
@@ -77,7 +52,7 @@ public class MasterMetaBootstrap {
    * TODO: The way this assign runs, nothing but chance to stop all replicas showing up on same
    * server as the hbase:meta region.
    */
-  protected void assignMetaReplicas()
+  void assignMetaReplicas()
       throws IOException, InterruptedException, KeeperException {
     int numReplicas = master.getConfiguration().getInt(HConstants.META_REPLICAS_NUM,
            HConstants.DEFAULT_META_REPLICA_NUM);
@@ -86,12 +61,11 @@ public class MasterMetaBootstrap {
       return;
     }
     final AssignmentManager assignmentManager = master.getAssignmentManager();
-    if (!assignmentManager.isMetaInitialized()) {
+    if (!assignmentManager.isMetaLoaded()) {
       throw new IllegalStateException("hbase:meta must be initialized first before we can " +
           "assign out its replicas");
     }
-    ServerName metaServername =
-        this.master.getMetaTableLocator().getMetaRegionLocation(this.master.getZooKeeper());
+    ServerName metaServername = MetaTableLocator.getMetaRegionLocation(this.master.getZooKeeper());
     for (int i = 1; i < numReplicas; i++) {
       // Get current meta state for replica from zk.
       RegionState metaState = MetaTableLocator.getMetaRegionState(master.getZooKeeper(), i);
@@ -122,36 +96,20 @@ public class MasterMetaBootstrap {
     try {
       List<String> metaReplicaZnodes = zooKeeper.getMetaReplicaNodes();
       for (String metaReplicaZnode : metaReplicaZnodes) {
-        int replicaId = zooKeeper.znodePaths.getMetaReplicaIdFromZnode(metaReplicaZnode);
+        int replicaId = zooKeeper.getZNodePaths().getMetaReplicaIdFromZnode(metaReplicaZnode);
         if (replicaId >= numMetaReplicasConfigured) {
           RegionState r = MetaTableLocator.getMetaRegionState(zooKeeper, replicaId);
           LOG.info("Closing excess replica of meta region " + r.getRegion());
           // send a close and wait for a max of 30 seconds
           ServerManager.closeRegionSilentlyAndWait(master.getClusterConnection(),
               r.getServerName(), r.getRegion(), 30000);
-          ZKUtil.deleteNode(zooKeeper, zooKeeper.znodePaths.getZNodeForReplica(replicaId));
+          ZKUtil.deleteNode(zooKeeper, zooKeeper.getZNodePaths().getZNodeForReplica(replicaId));
         }
       }
     } catch (Exception ex) {
       // ignore the exception since we don't want the master to be wedged due to potential
       // issues in the cleanup of the extra regions. We can do that cleanup via hbck or manually
       LOG.warn("Ignoring exception " + ex);
-    }
-  }
-
-  private void enableCrashedServerProcessing(final boolean waitForMeta)
-      throws InterruptedException {
-    // If crashed server processing is disabled, we enable it and expire those dead but not expired
-    // servers. This is required so that if meta is assigning to a server which dies after
-    // assignMeta starts assignment, ServerCrashProcedure can re-assign it. Otherwise, we will be
-    // stuck here waiting forever if waitForMeta is specified.
-    if (!master.isServerCrashProcessingEnabled()) {
-      master.setServerCrashProcessingEnabled(true);
-      master.getServerManager().processQueuedDeadServers();
-    }
-
-    if (waitForMeta) {
-      master.getMetaTableLocator().waitMetaRegionLocation(master.getZooKeeper());
     }
   }
 }

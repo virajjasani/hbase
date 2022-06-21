@@ -47,8 +47,8 @@ import org.slf4j.LoggerFactory;
 @InterfaceAudience.Public
 public class Append extends Mutation {
   private static final Logger LOG = LoggerFactory.getLogger(Append.class);
-  private static final long HEAP_OVERHEAD = (long)ClassSize.REFERENCE + ClassSize.TIMERANGE;
-  private TimeRange tr = new TimeRange();
+  private static final long HEAP_OVERHEAD = ClassSize.REFERENCE + ClassSize.TIMERANGE;
+  private TimeRange tr = TimeRange.allTime();
 
   /**
    * Sets the TimeRange to be used on the Get for this append.

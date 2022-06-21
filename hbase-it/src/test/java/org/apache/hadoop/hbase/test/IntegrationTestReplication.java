@@ -19,7 +19,6 @@
 package org.apache.hadoop.hbase.test;
 
 import org.apache.hbase.thirdparty.com.google.common.base.Joiner;
-import org.apache.commons.cli.CommandLine;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.Path;
@@ -38,6 +37,8 @@ import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLine;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -263,7 +264,7 @@ public class IntegrationTestReplication extends IntegrationTestBigLinkedList {
      */
     protected void runGenerator() throws Exception {
       Path outputPath = new Path(outputDir);
-      UUID uuid = UUID.randomUUID(); //create a random UUID.
+      UUID uuid = util.getRandomUUID(); //create a random UUID.
       Path generatorOutput = new Path(outputPath, uuid.toString());
 
       Generator generator = new Generator();
@@ -287,7 +288,7 @@ public class IntegrationTestReplication extends IntegrationTestBigLinkedList {
      */
     protected void runVerify(long expectedNumNodes) throws Exception {
       Path outputPath = new Path(outputDir);
-      UUID uuid = UUID.randomUUID(); //create a random UUID.
+      UUID uuid = util.getRandomUUID(); //create a random UUID.
       Path iterationOutput = new Path(outputPath, uuid.toString());
 
       Verify verify = new Verify();

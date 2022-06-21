@@ -22,22 +22,19 @@ import com.google.protobuf.Message;
 import com.google.protobuf.Service;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.regex.Matcher;
-
-import org.apache.commons.collections4.map.AbstractReferenceMap;
-import org.apache.commons.collections4.map.ReferenceMap;
+import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CompareOperator;
-import org.apache.hadoop.hbase.Coprocessor;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.RawCellBuilder;
@@ -70,7 +67,6 @@ import org.apache.hadoop.hbase.coprocessor.ObserverContext;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.coprocessor.RegionObserver;
-import org.apache.hadoop.hbase.coprocessor.RegionObserver.MutationType;
 import org.apache.hadoop.hbase.filter.ByteArrayComparable;
 import org.apache.hadoop.hbase.io.FSDataInputStreamWrapper;
 import org.apache.hadoop.hbase.io.Reference;
@@ -81,8 +77,6 @@ import org.apache.hadoop.hbase.regionserver.compactions.CompactionLifeCycleTrack
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
 import org.apache.hadoop.hbase.regionserver.querymatcher.DeleteTracker;
 import org.apache.hadoop.hbase.security.User;
-import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
-import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CoprocessorClassLoader;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.wal.WALEdit;
@@ -90,6 +84,9 @@ import org.apache.hadoop.hbase.wal.WALKey;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.org.apache.commons.collections4.map.AbstractReferenceMap;
+import org.apache.hbase.thirdparty.org.apache.commons.collections4.map.ReferenceMap;
 
 /**
  * Implements the coprocessor environment and runtime support for coprocessors
@@ -313,59 +310,19 @@ public class RegionCoprocessorHost
 
   static List<TableCoprocessorAttribute> getTableCoprocessorAttrsFromSchema(Configuration conf,
       TableDescriptor htd) {
-    List<TableCoprocessorAttribute> result = Lists.newArrayList();
-    for (Map.Entry<Bytes, Bytes> e: htd.getValues().entrySet()) {
-      String key = Bytes.toString(e.getKey().get()).trim();
-      if (HConstants.CP_HTD_ATTR_KEY_PATTERN.matcher(key).matches()) {
-        String spec = Bytes.toString(e.getValue().get()).trim();
-        // found one
-        try {
-          Matcher matcher = HConstants.CP_HTD_ATTR_VALUE_PATTERN.matcher(spec);
-          if (matcher.matches()) {
-            // jar file path can be empty if the cp class can be loaded
-            // from class loader.
-            Path path = matcher.group(1).trim().isEmpty() ?
-                null : new Path(matcher.group(1).trim());
-            String className = matcher.group(2).trim();
-            if (className.isEmpty()) {
-              LOG.error("Malformed table coprocessor specification: key=" +
-                key + ", spec: " + spec);
-              continue;
-            }
-            String priorityStr = matcher.group(3).trim();
-            int priority = priorityStr.isEmpty() ?
-                Coprocessor.PRIORITY_USER : Integer.parseInt(priorityStr);
-            String cfgSpec = null;
-            try {
-              cfgSpec = matcher.group(4);
-            } catch (IndexOutOfBoundsException ex) {
-              // ignore
-            }
-            Configuration ourConf;
-            if (cfgSpec != null && !cfgSpec.trim().equals("|")) {
-              cfgSpec = cfgSpec.substring(cfgSpec.indexOf('|') + 1);
-              // do an explicit deep copy of the passed configuration
-              ourConf = new Configuration(false);
-              HBaseConfiguration.merge(ourConf, conf);
-              Matcher m = HConstants.CP_HTD_ATTR_VALUE_PARAM_PATTERN.matcher(cfgSpec);
-              while (m.find()) {
-                ourConf.set(m.group(1), m.group(2));
-              }
-            } else {
-              ourConf = conf;
-            }
-            result.add(new TableCoprocessorAttribute(path, className, priority, ourConf));
-          } else {
-            LOG.error("Malformed table coprocessor specification: key=" + key +
-              ", spec: " + spec);
-          }
-        } catch (Exception ioe) {
-          LOG.error("Malformed table coprocessor specification: key=" + key +
-            ", spec: " + spec);
-        }
+    return htd.getCoprocessorDescriptors().stream().map(cp -> {
+      Path path = cp.getJarPath().map(p -> new Path(p)).orElse(null);
+      Configuration ourConf;
+      if (!cp.getProperties().isEmpty()) {
+        // do an explicit deep copy of the passed configuration
+        ourConf = new Configuration(false);
+        HBaseConfiguration.merge(ourConf, conf);
+        cp.getProperties().forEach((k, v) -> ourConf.set(k, v));
+      } else {
+        ourConf = conf;
       }
-    }
-    return result;
+      return new TableCoprocessorAttribute(path, cp.getClassName(), cp.getPriority(), ourConf);
+    }).collect(Collectors.toList());
   }
 
   /**
@@ -393,7 +350,16 @@ public class RegionCoprocessorHost
           cl = CoprocessorHost.class.getClassLoader();
         }
         Thread.currentThread().setContextClassLoader(cl);
-        cl.loadClass(attr.getClassName());
+        if (cl instanceof CoprocessorClassLoader) {
+          String[] includedClassPrefixes = null;
+          if (conf.get(HConstants.CP_HTD_ATTR_INCLUSION_KEY) != null) {
+            String prefixes = attr.conf.get(HConstants.CP_HTD_ATTR_INCLUSION_KEY);
+            includedClassPrefixes = prefixes.split(";");
+          }
+          ((CoprocessorClassLoader)cl).loadClass(attr.getClassName(), includedClassPrefixes);
+        } else {
+          cl.loadClass(attr.getClassName());
+        }
       } catch (ClassNotFoundException e) {
         throw new IOException("Class " + attr.getClassName() + " cannot be loaded", e);
       } finally {
@@ -465,17 +431,22 @@ public class RegionCoprocessorHost
   @Override
   public RegionCoprocessor checkAndGetInstance(Class<?> implClass)
       throws InstantiationException, IllegalAccessException {
-    if (RegionCoprocessor.class.isAssignableFrom(implClass)) {
-      return (RegionCoprocessor)implClass.newInstance();
-    } else if (CoprocessorService.class.isAssignableFrom(implClass)) {
-      // For backward compatibility with old CoprocessorService impl which don't extend
-      // RegionCoprocessor.
-      return new CoprocessorServiceBackwardCompatiblity.RegionCoprocessorService(
-          (CoprocessorService)implClass.newInstance());
-    } else {
-      LOG.error(implClass.getName() + " is not of type RegionCoprocessor. Check the "
-          + "configuration " + CoprocessorHost.REGION_COPROCESSOR_CONF_KEY);
-      return null;
+    try {
+      if (RegionCoprocessor.class.isAssignableFrom(implClass)) {
+        return implClass.asSubclass(RegionCoprocessor.class).getDeclaredConstructor().newInstance();
+      } else if (CoprocessorService.class.isAssignableFrom(implClass)) {
+        // For backward compatibility with old CoprocessorService impl which don't extend
+        // RegionCoprocessor.
+        CoprocessorService cs;
+        cs = implClass.asSubclass(CoprocessorService.class).getDeclaredConstructor().newInstance();
+        return new CoprocessorServiceBackwardCompatiblity.RegionCoprocessorService(cs);
+      } else {
+        LOG.error("{} is not of type RegionCoprocessor. Check the configuration of {}",
+            implClass.getName(), CoprocessorHost.REGION_COPROCESSOR_CONF_KEY);
+        return null;
+      }
+    } catch (NoSuchMethodException | InvocationTargetException e) {
+      throw (InstantiationException) new InstantiationException(implClass.getName()).initCause(e);
     }
   }
 
@@ -1119,6 +1090,8 @@ public class RegionCoprocessorHost
    * @return true or false to return to client if default processing should be bypassed, or null
    * otherwise
    */
+  @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="NP_BOOLEAN_RETURN_NULL",
+      justification="Null is legit")
   public Boolean preCheckAndPutAfterRowLock(
       final byte[] row, final byte[] family, final byte[] qualifier, final CompareOperator op,
       final ByteArrayComparable comparator, final Put put) throws IOException {
@@ -1206,6 +1179,8 @@ public class RegionCoprocessorHost
    * @return true or false to return to client if default processing should be bypassed,
    * or null otherwise
    */
+  @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="NP_BOOLEAN_RETURN_NULL",
+      justification="Null is legit")
   public Boolean preCheckAndDeleteAfterRowLock(final byte[] row, final byte[] family,
       final byte[] qualifier, final CompareOperator op, final ByteArrayComparable comparator,
       final Delete delete) throws IOException {
@@ -1715,16 +1690,32 @@ public class RegionCoprocessorHost
         });
   }
 
-  public Cell postMutationBeforeWAL(final MutationType opType, final Mutation mutation,
-      final Cell oldCell, Cell newCell) throws IOException {
+  public List<Pair<Cell, Cell>> postIncrementBeforeWAL(final Mutation mutation,
+      final List<Pair<Cell, Cell>> cellPairs) throws IOException {
     if (this.coprocEnvironments.isEmpty()) {
-      return newCell;
+      return cellPairs;
     }
     return execOperationWithResult(
-        new ObserverOperationWithResult<RegionObserver, Cell>(regionObserverGetter, newCell) {
+        new ObserverOperationWithResult<RegionObserver, List<Pair<Cell, Cell>>>(
+            regionObserverGetter, cellPairs) {
           @Override
-          public Cell call(RegionObserver observer) throws IOException {
-            return observer.postMutationBeforeWAL(this, opType, mutation, oldCell, getResult());
+          public List<Pair<Cell, Cell>> call(RegionObserver observer) throws IOException {
+            return observer.postIncrementBeforeWAL(this, mutation, getResult());
+          }
+        });
+  }
+
+  public List<Pair<Cell, Cell>> postAppendBeforeWAL(final Mutation mutation,
+      final List<Pair<Cell, Cell>> cellPairs) throws IOException {
+    if (this.coprocEnvironments.isEmpty()) {
+      return cellPairs;
+    }
+    return execOperationWithResult(
+        new ObserverOperationWithResult<RegionObserver, List<Pair<Cell, Cell>>>(
+            regionObserverGetter, cellPairs) {
+          @Override
+          public List<Pair<Cell, Cell>> call(RegionObserver observer) throws IOException {
+            return observer.postAppendBeforeWAL(this, mutation, getResult());
           }
         });
   }

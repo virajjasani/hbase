@@ -26,13 +26,19 @@
     <fileSet>
       <directory>${project.basedir}/../target/site</directory>
       <outputDirectory>docs</outputDirectory>
+      <!--Don't include dev apidocs. They bloat the tgz by almost 50%.
+           See HBASE-20149-->
+      <excludes>
+        <exclude>**/*devapidocs/**</exclude>
+      </excludes>
     </fileSet>
     <!-- Include top level text files-->
     <fileSet>
       <directory>${project.basedir}/..</directory>
       <outputDirectory>.</outputDirectory>
       <includes>
-        <include>CHANGES.txt</include>
+        <include>CHANGES.md</include>
+        <include>RELEASENOTES.md</include>
         <include>README.txt</include>
       </includes>
       <fileMode>0644</fileMode>

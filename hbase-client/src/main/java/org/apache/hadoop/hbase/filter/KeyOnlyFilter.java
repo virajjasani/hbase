@@ -23,10 +23,14 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.Objects;
 import java.util.Optional;
+
 import org.apache.hadoop.hbase.ByteBufferExtendedCell;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.Tag;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -133,13 +137,25 @@ public class KeyOnlyFilter extends FilterBase {
     return this.lenAsVal == other.lenAsVal;
   }
 
+  @Override
+  public boolean equals(Object obj) {
+    return obj instanceof Filter && areSerializedFieldsEqual((Filter) obj);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(this.lenAsVal);
+  }
+
   static class KeyOnlyCell implements Cell {
     private Cell cell;
+    private int keyLen;
     private boolean lenAsVal;
 
     public KeyOnlyCell(Cell c, boolean lenAsVal) {
       this.cell = c;
       this.lenAsVal = lenAsVal;
+      this.keyLen = KeyValueUtil.keyLength(c);
     }
 
     @Override
@@ -232,6 +248,11 @@ public class KeyOnlyFilter extends FilterBase {
     }
 
     @Override
+    public int getSerializedSize() {
+      return KeyValue.KEYVALUE_INFRASTRUCTURE_SIZE + keyLen + getValueLength();
+    }
+
+    @Override
     public byte[] getTagsArray() {
       return HConstants.EMPTY_BYTE_ARRAY;
     }
@@ -244,6 +265,11 @@ public class KeyOnlyFilter extends FilterBase {
     @Override
     public int getTagsLength() {
       return 0;
+    }
+
+    @Override
+    public long heapSize() {
+      return cell.heapSize();
     }
   }
 

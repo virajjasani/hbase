@@ -54,9 +54,12 @@ public class DisabledTableSnapshotHandler extends TakeSnapshotHandler {
   /**
    * @param snapshot descriptor of the snapshot to take
    * @param masterServices master services provider
+   * @throws IOException if it cannot access the filesystem of the snapshot
+   *         temporary directory
    */
   public DisabledTableSnapshotHandler(SnapshotDescription snapshot,
-      final MasterServices masterServices, final SnapshotManager snapshotManager) {
+      final MasterServices masterServices, final SnapshotManager snapshotManager)
+      throws IOException {
     super(snapshot, masterServices, snapshotManager);
   }
 
@@ -118,5 +121,12 @@ public class DisabledTableSnapshotHandler extends TakeSnapshotHandler {
       LOG.debug("Marking snapshot" + ClientSnapshotDescriptionUtils.toString(snapshot)
           + " as finished.");
     }
+  }
+
+  @Override
+  protected boolean downgradeToSharedTableLock() {
+    // for taking snapshot on disabled table, it is OK to always hold the exclusive lock, as we do
+    // not need to assign the regions when there are region server crashes.
+    return false;
   }
 }

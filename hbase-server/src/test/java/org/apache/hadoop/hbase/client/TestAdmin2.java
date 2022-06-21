@@ -46,12 +46,15 @@ import org.apache.hadoop.hbase.TableNotDisabledException;
 import org.apache.hadoop.hbase.TableNotEnabledException;
 import org.apache.hadoop.hbase.TableNotFoundException;
 import org.apache.hadoop.hbase.UnknownRegionException;
+import org.apache.hadoop.hbase.Waiter.Predicate;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.constraint.ConstraintException;
+import org.apache.hadoop.hbase.ipc.HBaseRpcController;
 import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.master.assignment.AssignmentManager;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
+import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -59,6 +62,7 @@ import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.junit.After;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
@@ -95,9 +99,9 @@ public class TestAdmin2 {
     TEST_UTIL.getConfiguration().setInt("hbase.regionserver.msginterval", 100);
     TEST_UTIL.getConfiguration().setInt("hbase.client.pause", 250);
     TEST_UTIL.getConfiguration().setInt("hbase.client.retries.number", 6);
-    TEST_UTIL.getConfiguration().setInt("hbase.regionserver.metahandler.count", 30);
-    TEST_UTIL.getConfiguration().setBoolean(
-        "hbase.master.enabletable.roundrobin", true);
+    TEST_UTIL.getConfiguration().setInt(HConstants.REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT, 30);
+    TEST_UTIL.getConfiguration().setInt(HConstants.REGION_SERVER_HANDLER_COUNT, 30);
+    TEST_UTIL.getConfiguration().setBoolean("hbase.master.enabletable.roundrobin", true);
     TEST_UTIL.startMiniCluster(3);
   }
 
@@ -453,7 +457,7 @@ public class TestAdmin2 {
     RegionInfo hri = tableRegions.get(0);
     AssignmentManager am = master.getAssignmentManager();
     ServerName server = am.getRegionStates().getRegionServerOfRegion(hri);
-    localAdmin.move(hri.getEncodedNameAsBytes(), Bytes.toBytes(server.getServerName()));
+    localAdmin.move(hri.getEncodedNameAsBytes(), server);
     assertEquals("Current region server and region server before move should be same.", server,
       am.getRegionStates().getRegionServerOfRegion(hri));
   }
@@ -710,12 +714,12 @@ public class TestAdmin2 {
     assertEquals(3, clusterRegionServers.size());
 
     HashMap<ServerName, List<RegionInfo>> serversToDecommssion = new HashMap<>();
-    // Get a server that has regions. We will decommission two of the servers,
+    // Get a server that has meta online. We will decommission two of the servers,
     // leaving one online.
     int i;
     for (i = 0; i < clusterRegionServers.size(); i++) {
       List<RegionInfo> regionsOnServer = admin.getRegions(clusterRegionServers.get(i));
-      if (regionsOnServer.size() > 0) {
+      if (admin.getRegions(clusterRegionServers.get(i)).stream().anyMatch(p -> p.isMetaRegion())) {
         serversToDecommssion.put(clusterRegionServers.get(i), regionsOnServer);
         break;
       }
@@ -753,5 +757,101 @@ public class TestAdmin2 {
         TEST_UTIL.assertRegionOnServer(region, server, 10000);
       }
     }
+  }
+
+  /**
+   * TestCase for HBASE-21355
+   */
+  @Test
+  public void testGetRegionInfo() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    Table table = TEST_UTIL.createTable(tableName, Bytes.toBytes("f"));
+    for (int i = 0; i < 100; i++) {
+      table.put(new Put(Bytes.toBytes(i)).addColumn(Bytes.toBytes("f"), Bytes.toBytes("q"),
+        Bytes.toBytes(i)));
+    }
+    admin.flush(tableName);
+
+    HRegionServer rs = TEST_UTIL.getRSForFirstRegionInTable(table.getName());
+    List<HRegion> regions = rs.getRegions(tableName);
+    Assert.assertEquals(1, regions.size());
+
+    HRegion region = regions.get(0);
+    byte[] regionName = region.getRegionInfo().getRegionName();
+    HStore store = region.getStore(Bytes.toBytes("f"));
+    long expectedStoreFilesSize = store.getStorefilesSize();
+    Assert.assertNotNull(store);
+    Assert.assertEquals(expectedStoreFilesSize, store.getSize());
+
+    ClusterConnection conn = ((ClusterConnection) admin.getConnection());
+    HBaseRpcController controller = conn.getRpcControllerFactory().newController();
+    for (int i = 0; i < 10; i++) {
+      RegionInfo ri =
+          ProtobufUtil.getRegionInfo(controller, conn.getAdmin(rs.getServerName()), regionName);
+      Assert.assertEquals(region.getRegionInfo(), ri);
+
+      // Make sure that the store size is still the actual file system's store size.
+      Assert.assertEquals(expectedStoreFilesSize, store.getSize());
+    }
+  }
+
+  @Test
+  public void testTableSplitFollowedByModify() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    TEST_UTIL.createTable(tableName, Bytes.toBytes("f"));
+
+    // get the original table region count
+    List<RegionInfo> regions = admin.getRegions(tableName);
+    int originalCount = regions.size();
+    assertEquals(1, originalCount);
+
+    // split the table and wait until region count increases
+    admin.split(tableName, Bytes.toBytes(3));
+    TEST_UTIL.waitFor(30000, new Predicate<Exception>() {
+
+      @Override
+      public boolean evaluate() throws Exception {
+        return admin.getRegions(tableName).size() > originalCount;
+      }
+    });
+
+    // do some table modification
+    TableDescriptor tableDesc = TableDescriptorBuilder.newBuilder(admin.getDescriptor(tableName))
+        .setMaxFileSize(11111111)
+        .build();
+    admin.modifyTable(tableDesc);
+    assertEquals(11111111, admin.getDescriptor(tableName).getMaxFileSize());
+  }
+
+  @Test
+  public void testTableMergeFollowedByModify() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    TEST_UTIL.createTable(tableName, new byte[][] { Bytes.toBytes("f") },
+      new byte[][] { Bytes.toBytes(3) });
+
+    // assert we have at least 2 regions in the table
+    List<RegionInfo> regions = admin.getRegions(tableName);
+    int originalCount = regions.size();
+    assertTrue(originalCount >= 2);
+
+    byte[] nameOfRegionA = regions.get(0).getEncodedNameAsBytes();
+    byte[] nameOfRegionB = regions.get(1).getEncodedNameAsBytes();
+
+    // merge the table regions and wait until region count decreases
+    admin.mergeRegionsAsync(nameOfRegionA, nameOfRegionB, true);
+    TEST_UTIL.waitFor(30000, new Predicate<Exception>() {
+
+      @Override
+      public boolean evaluate() throws Exception {
+        return admin.getRegions(tableName).size() < originalCount;
+      }
+    });
+
+    // do some table modification
+    TableDescriptor tableDesc = TableDescriptorBuilder.newBuilder(admin.getDescriptor(tableName))
+        .setMaxFileSize(11111111)
+        .build();
+    admin.modifyTable(tableDesc);
+    assertEquals(11111111, admin.getDescriptor(tableName).getMaxFileSize());
   }
 }

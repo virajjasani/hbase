@@ -18,27 +18,28 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import com.google.protobuf.Service;
 import java.io.IOException;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentMap;
-
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.Server;
+import org.apache.hadoop.hbase.TableDescriptors;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.locking.EntityLock;
 import org.apache.hadoop.hbase.executor.ExecutorService;
+import org.apache.hadoop.hbase.io.hfile.BlockCache;
 import org.apache.hadoop.hbase.ipc.RpcServerInterface;
+import org.apache.hadoop.hbase.mob.MobFileCache;
 import org.apache.hadoop.hbase.quotas.RegionServerRpcQuotaManager;
 import org.apache.hadoop.hbase.quotas.RegionServerSpaceQuotaManager;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequester;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.yetus.audience.InterfaceAudience;
-import org.apache.zookeeper.KeeperException;
 
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
-
-import com.google.protobuf.Service;
 
 /**
  * A curated subset of services provided by {@link HRegionServer}.
@@ -95,56 +96,77 @@ public interface RegionServerServices extends Server, MutableOnlineRegions, Favo
    */
   class PostOpenDeployContext {
     private final HRegion region;
+    private final long openProcId;
     private final long masterSystemTime;
 
-    @InterfaceAudience.Private
-    public PostOpenDeployContext(HRegion region, long masterSystemTime) {
+    public PostOpenDeployContext(HRegion region, long openProcId, long masterSystemTime) {
       this.region = region;
+      this.openProcId = openProcId;
       this.masterSystemTime = masterSystemTime;
     }
+
     public HRegion getRegion() {
       return region;
     }
+
+    public long getOpenProcId() {
+      return openProcId;
+    }
+
     public long getMasterSystemTime() {
       return masterSystemTime;
     }
   }
 
   /**
-   * Tasks to perform after region open to complete deploy of region on
-   * regionserver
-   *
+   * Tasks to perform after region open to complete deploy of region on regionserver
    * @param context the context
-   * @throws KeeperException
-   * @throws IOException
    */
-  void postOpenDeployTasks(final PostOpenDeployContext context) throws KeeperException, IOException;
+  void postOpenDeployTasks(final PostOpenDeployContext context) throws IOException;
 
   class RegionStateTransitionContext {
     private final TransitionCode code;
     private final long openSeqNum;
     private final long masterSystemTime;
+    private final long[] procIds;
     private final RegionInfo[] hris;
 
-    @InterfaceAudience.Private
     public RegionStateTransitionContext(TransitionCode code, long openSeqNum, long masterSystemTime,
         RegionInfo... hris) {
       this.code = code;
       this.openSeqNum = openSeqNum;
       this.masterSystemTime = masterSystemTime;
       this.hris = hris;
+      this.procIds = new long[hris.length];
     }
+
+    public RegionStateTransitionContext(TransitionCode code, long openSeqNum, long procId,
+        long masterSystemTime, RegionInfo hri) {
+      this.code = code;
+      this.openSeqNum = openSeqNum;
+      this.masterSystemTime = masterSystemTime;
+      this.hris = new RegionInfo[] { hri };
+      this.procIds = new long[] { procId };
+    }
+
     public TransitionCode getCode() {
       return code;
     }
+
     public long getOpenSeqNum() {
       return openSeqNum;
     }
+
     public long getMasterSystemTime() {
       return masterSystemTime;
     }
+
     public RegionInfo[] getHris() {
       return hris;
+    }
+
+    public long[] getProcIds() {
+      return procIds;
     }
   }
 
@@ -234,4 +256,24 @@ public interface RegionServerServices extends Server, MutableOnlineRegions, Favo
    * See HBASE-17712 for more details.
    */
   void unassign(byte[] regionName) throws IOException;
+
+  /**
+   * @return True if cluster is up; false if cluster is not up (we are shutting down).
+   */
+  boolean isClusterUp();
+
+  /**
+   * @return Return table descriptors implementation.
+   */
+  TableDescriptors getTableDescriptors();
+
+  /**
+   * @return The block cache instance.
+   */
+  Optional<BlockCache> getBlockCache();
+
+  /**
+   * @return The cache for mob files.
+   */
+  Optional<MobFileCache> getMobFileCache();
 }

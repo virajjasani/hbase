@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import org.apache.hadoop.hbase.CellScannable;
 import org.apache.hadoop.hbase.ClusterMetrics.Option;
@@ -50,9 +51,11 @@ import org.apache.hadoop.hbase.client.Row;
 import org.apache.hadoop.hbase.client.RowMutations;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.client.replication.ReplicationPeerConfigUtil;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.filter.ByteArrayComparable;
+import org.apache.hadoop.hbase.io.TimeRange;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
@@ -132,6 +135,7 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SetBalance
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SetCleanerChoreRunningRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SetNormalizerRunningRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SetSplitOrMergeEnabledRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SetTableStateInMetaRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SplitTableRegionRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.TruncateTableRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.UnassignRegionRequest;
@@ -235,16 +239,9 @@ public final class RequestConverter {
   public static MutateRequest buildMutateRequest(
       final byte[] regionName, final byte[] row, final byte[] family,
       final byte [] qualifier, final ByteArrayComparable comparator,
-      final CompareType compareType, final Put put) throws IOException {
-    MutateRequest.Builder builder = MutateRequest.newBuilder();
-    RegionSpecifier region = buildRegionSpecifier(
-      RegionSpecifierType.REGION_NAME, regionName);
-    builder.setRegion(region);
-    Condition condition = buildCondition(
-      row, family, qualifier, comparator, compareType);
-    builder.setMutation(ProtobufUtil.toMutation(MutationType.PUT, put, MutationProto.newBuilder()));
-    builder.setCondition(condition);
-    return builder.build();
+      final CompareType compareType, TimeRange timeRange, final Put put) throws IOException {
+    return buildMutateRequest(regionName, row, family, qualifier, comparator, compareType, timeRange
+      , put, MutationType.PUT);
   }
 
   /**
@@ -263,19 +260,21 @@ public final class RequestConverter {
   public static MutateRequest buildMutateRequest(
       final byte[] regionName, final byte[] row, final byte[] family,
       final byte [] qualifier, final ByteArrayComparable comparator,
-      final CompareType compareType, final Delete delete) throws IOException {
-    MutateRequest.Builder builder = MutateRequest.newBuilder();
-    RegionSpecifier region = buildRegionSpecifier(
-      RegionSpecifierType.REGION_NAME, regionName);
-    builder.setRegion(region);
-    Condition condition = buildCondition(
-      row, family, qualifier, comparator, compareType);
-    builder.setMutation(ProtobufUtil.toMutation(MutationType.DELETE, delete,
-      MutationProto.newBuilder()));
-    builder.setCondition(condition);
-    return builder.build();
+      final CompareType compareType, TimeRange timeRange, final Delete delete) throws IOException {
+    return buildMutateRequest(regionName, row, family, qualifier, comparator, compareType, timeRange
+      , delete, MutationType.DELETE);
   }
 
+  public static MutateRequest buildMutateRequest(final byte[] regionName, final byte[] row,
+    final byte[] family, final byte[] qualifier, final ByteArrayComparable comparator,
+    final CompareType compareType, TimeRange timeRange, final Mutation mutation,
+    final MutationType type) throws IOException {
+    return MutateRequest.newBuilder()
+      .setRegion(buildRegionSpecifier(RegionSpecifierType.REGION_NAME, regionName))
+      .setMutation(ProtobufUtil.toMutation(type, mutation))
+      .setCondition(buildCondition(row, family, qualifier, comparator, compareType, timeRange))
+      .build();
+  }
   /**
    * Create a protocol buffer MutateRequest for conditioned row mutations
    *
@@ -289,17 +288,15 @@ public final class RequestConverter {
    * @return a mutate request
    * @throws IOException
    */
-  public static ClientProtos.MultiRequest buildMutateRequest(
-      final byte[] regionName, final byte[] row, final byte[] family,
-      final byte [] qualifier, final ByteArrayComparable comparator,
-      final CompareType compareType, final RowMutations rowMutations) throws IOException {
+  public static ClientProtos.MultiRequest buildMutateRequest(final byte[] regionName,
+    final byte[] row, final byte[] family, final byte[] qualifier,
+    final ByteArrayComparable comparator, final CompareType compareType, final TimeRange timeRange,
+    final RowMutations rowMutations) throws IOException {
     RegionAction.Builder builder =
         getRegionActionBuilderWithRegion(RegionAction.newBuilder(), regionName);
     builder.setAtomic(true);
     ClientProtos.Action.Builder actionBuilder = ClientProtos.Action.newBuilder();
     MutationProto.Builder mutationBuilder = MutationProto.newBuilder();
-    Condition condition = buildCondition(
-        row, family, qualifier, comparator, compareType);
     for (Mutation mutation: rowMutations.getMutations()) {
       MutationType mutateType = null;
       if (mutation instanceof Put) {
@@ -316,10 +313,9 @@ public final class RequestConverter {
       actionBuilder.setMutation(mp);
       builder.addAction(actionBuilder.build());
     }
-    ClientProtos.MultiRequest request =
-        ClientProtos.MultiRequest.newBuilder().addRegionAction(builder.build())
-            .setCondition(condition).build();
-    return request;
+    return ClientProtos.MultiRequest.newBuilder().addRegionAction(builder.build())
+        .setCondition(buildCondition(row, family, qualifier, comparator, compareType, timeRange))
+        .build();
   }
 
   /**
@@ -473,7 +469,7 @@ public final class RequestConverter {
     return regionActionBuilder;
   }
 
-  private static RegionAction.Builder getRegionActionBuilderWithRegion(
+  public static RegionAction.Builder getRegionActionBuilderWithRegion(
       final RegionAction.Builder regionActionBuilder, final byte [] regionName) {
     RegionSpecifier region = buildRegionSpecifier(RegionSpecifierType.REGION_NAME, regionName);
     regionActionBuilder.setRegion(region);
@@ -566,7 +562,7 @@ public final class RequestConverter {
       final byte[] regionName, boolean assignSeqNum,
       final Token<?> userToken, final String bulkToken) {
     return buildBulkLoadHFileRequest(familyPaths, regionName, assignSeqNum, userToken, bulkToken,
-        false);
+        false, null);
   }
 
   /**
@@ -581,9 +577,9 @@ public final class RequestConverter {
    * @return a bulk load request
    */
   public static BulkLoadHFileRequest buildBulkLoadHFileRequest(
-      final List<Pair<byte[], String>> familyPaths,
-      final byte[] regionName, boolean assignSeqNum,
-      final Token<?> userToken, final String bulkToken, boolean copyFiles) {
+      final List<Pair<byte[], String>> familyPaths, final byte[] regionName, boolean assignSeqNum,
+        final Token<?> userToken, final String bulkToken, boolean copyFiles,
+          List<String> clusterIds) {
     RegionSpecifier region = RequestConverter.buildRegionSpecifier(
       RegionSpecifierType.REGION_NAME, regionName);
 
@@ -621,6 +617,9 @@ public final class RequestConverter {
       request.setBulkToken(bulkToken);
     }
     request.setCopyFile(copyFiles);
+    if (clusterIds != null) {
+      request.addAllClusterIds(clusterIds);
+    }
     return request.build();
   }
 
@@ -943,27 +942,6 @@ public final class RequestConverter {
   }
 
   /**
-   * Create a protocol buffer OpenRegionRequest to open a list of regions
-   * @param server the serverName for the RPC
-   * @param regionOpenInfos info of a list of regions to open
-   * @return a protocol buffer OpenRegionRequest
-   */
-  public static OpenRegionRequest buildOpenRegionRequest(ServerName server,
-      final List<Pair<RegionInfo, List<ServerName>>> regionOpenInfos) {
-    OpenRegionRequest.Builder builder = OpenRegionRequest.newBuilder();
-    for (Pair<RegionInfo, List<ServerName>> regionOpenInfo : regionOpenInfos) {
-      builder.addOpenInfo(buildRegionOpenInfo(regionOpenInfo.getFirst(),
-        regionOpenInfo.getSecond()));
-    }
-    if (server != null) {
-      builder.setServerStartCode(server.getStartcode());
-    }
-    // send the master's wall clock time as well, so that the RS can refer to it
-    builder.setMasterSystemTime(EnvironmentEdgeManager.currentTime());
-    return builder.build();
-  }
-
-  /**
    * Create a protocol buffer OpenRegionRequest for a given region
    * @param server the serverName for the RPC
    * @param region the region to open
@@ -973,7 +951,7 @@ public final class RequestConverter {
   public static OpenRegionRequest buildOpenRegionRequest(ServerName server,
       final RegionInfo region, List<ServerName> favoredNodes) {
     OpenRegionRequest.Builder builder = OpenRegionRequest.newBuilder();
-    builder.addOpenInfo(buildRegionOpenInfo(region, favoredNodes));
+    builder.addOpenInfo(buildRegionOpenInfo(region, favoredNodes, -1L));
     if (server != null) {
       builder.setServerStartCode(server.getStartcode());
     }
@@ -1033,7 +1011,7 @@ public final class RequestConverter {
   }
 
   /**
-   * @see {@link #buildRollWALWriterRequest()}
+   * @see #buildRollWALWriterRequest()
    */
   private static RollWALWriterRequest ROLL_WAL_WRITER_REQUEST = RollWALWriterRequest.newBuilder()
       .build();
@@ -1047,7 +1025,7 @@ public final class RequestConverter {
   }
 
   /**
-   * @see {@link #buildGetServerInfoRequest()}
+   * @see #buildGetServerInfoRequest()
    */
   private static GetServerInfoRequest GET_SERVER_INFO_REQUEST = GetServerInfoRequest.newBuilder()
       .build();
@@ -1099,17 +1077,17 @@ public final class RequestConverter {
    * @return a Condition
    * @throws IOException
    */
-  private static Condition buildCondition(final byte[] row, final byte[] family,
-      final byte[] qualifier, final ByteArrayComparable comparator, final CompareType compareType)
-      throws IOException {
-    Condition.Builder builder = Condition.newBuilder();
-    builder.setRow(UnsafeByteOperations.unsafeWrap(row));
-    builder.setFamily(UnsafeByteOperations.unsafeWrap(family));
-    builder.setQualifier(UnsafeByteOperations
-        .unsafeWrap(qualifier == null ? HConstants.EMPTY_BYTE_ARRAY : qualifier));
-    builder.setComparator(ProtobufUtil.toComparator(comparator));
-    builder.setCompareType(compareType);
-    return builder.build();
+  public static Condition buildCondition(final byte[] row, final byte[] family,
+    final byte[] qualifier, final ByteArrayComparable comparator, final CompareType compareType,
+    final TimeRange timeRange) {
+    return Condition.newBuilder().setRow(UnsafeByteOperations.unsafeWrap(row))
+      .setFamily(UnsafeByteOperations.unsafeWrap(family))
+      .setQualifier(UnsafeByteOperations.unsafeWrap(qualifier == null ?
+        HConstants.EMPTY_BYTE_ARRAY : qualifier))
+      .setComparator(ProtobufUtil.toComparator(comparator))
+      .setCompareType(compareType)
+      .setTimeRange(ProtobufUtil.toTimeRange(timeRange))
+      .build();
   }
 
   /**
@@ -1450,6 +1428,16 @@ public final class RequestConverter {
   }
 
   /**
+   * Creates a protocol buffer SetTableStateInMetaRequest
+   * @param state table state to update in Meta
+   * @return a SetTableStateInMetaRequest
+   */
+  public static SetTableStateInMetaRequest buildSetTableStateInMetaRequest(final TableState state) {
+    return SetTableStateInMetaRequest.newBuilder().setTableState(state.convert())
+        .setTableName(ProtobufUtil.toProtoTableName(state.getTableName())).build();
+  }
+
+  /**
    * Creates a protocol buffer GetTableDescriptorsRequest for a single table
    *
    * @param tableName the table name
@@ -1529,7 +1517,7 @@ public final class RequestConverter {
   }
 
   /**
-   * @see {@link #buildCatalogScanRequest}
+   * @see #buildCatalogScanRequest
    */
   private static final RunCatalogScanRequest CATALOG_SCAN_REQUEST =
     RunCatalogScanRequest.newBuilder().build();
@@ -1551,7 +1539,7 @@ public final class RequestConverter {
   }
 
   /**
-   * @see {@link #buildIsCatalogJanitorEnabledRequest()}
+   * @see #buildIsCatalogJanitorEnabledRequest()
    */
   private static final IsCatalogJanitorEnabledRequest IS_CATALOG_JANITOR_ENABLED_REQUEST =
     IsCatalogJanitorEnabledRequest.newBuilder().build();
@@ -1565,7 +1553,7 @@ public final class RequestConverter {
   }
 
   /**
-   * @see {@link #buildCleanerChoreRequest}
+   * @see #buildRunCleanerChoreRequest()
    */
   private static final RunCleanerChoreRequest CLEANER_CHORE_REQUEST =
     RunCleanerChoreRequest.newBuilder().build();
@@ -1587,7 +1575,7 @@ public final class RequestConverter {
   }
 
   /**
-   * @see {@link #buildIsCleanerChoreEnabledRequest()}
+   * @see #buildIsCleanerChoreEnabledRequest()
    */
   private static final IsCleanerChoreEnabledRequest IS_CLEANER_CHORE_ENABLED_REQUEST =
     IsCleanerChoreEnabledRequest.newBuilder().build();
@@ -1614,8 +1602,8 @@ public final class RequestConverter {
   /**
    * Create a RegionOpenInfo based on given region info and version of offline node
    */
-  public static RegionOpenInfo buildRegionOpenInfo(
-      final RegionInfo region, final List<ServerName> favoredNodes) {
+  public static RegionOpenInfo buildRegionOpenInfo(RegionInfo region, List<ServerName> favoredNodes,
+      long openProcId) {
     RegionOpenInfo.Builder builder = RegionOpenInfo.newBuilder();
     builder.setRegion(ProtobufUtil.toRegionInfo(region));
     if (favoredNodes != null) {
@@ -1623,6 +1611,7 @@ public final class RequestConverter {
         builder.addFavoredNodes(ProtobufUtil.toServerName(server));
       }
     }
+    builder.setOpenProcId(openProcId);
     return builder.build();
   }
 
@@ -1873,5 +1862,36 @@ public final class RequestConverter {
       pbServers.add(ProtobufUtil.toServerName(server));
     }
     return pbServers;
+  }
+
+  // HBCK2
+  public static MasterProtos.AssignsRequest toAssignRegionsRequest(
+      List<String> encodedRegionNames, boolean override) {
+    MasterProtos.AssignsRequest.Builder b = MasterProtos.AssignsRequest.newBuilder();
+    return b.addAllRegion(toEncodedRegionNameRegionSpecifiers(encodedRegionNames)).
+        setOverride(override).build();
+  }
+
+  public static MasterProtos.UnassignsRequest toUnassignRegionsRequest(
+      List<String> encodedRegionNames, boolean override) {
+    MasterProtos.UnassignsRequest.Builder b =
+        MasterProtos.UnassignsRequest.newBuilder();
+    return b.addAllRegion(toEncodedRegionNameRegionSpecifiers(encodedRegionNames)).
+        setOverride(override).build();
+  }
+
+  public static MasterProtos.ScheduleServerCrashProcedureRequest
+      toScheduleServerCrashProcedureRequest(List<ServerName> serverNames) {
+    MasterProtos.ScheduleServerCrashProcedureRequest.Builder builder =
+        MasterProtos.ScheduleServerCrashProcedureRequest.newBuilder();
+    serverNames.stream().map(ProtobufUtil::toServerName).forEach(sn -> builder.addServerName(sn));
+    return builder.build();
+  }
+
+  private static List<RegionSpecifier> toEncodedRegionNameRegionSpecifiers(
+      List<String> encodedRegionNames) {
+    return encodedRegionNames.stream().
+        map(r -> buildRegionSpecifier(RegionSpecifierType.ENCODED_REGION_NAME, Bytes.toBytes(r))).
+        collect(Collectors.toList());
   }
 }

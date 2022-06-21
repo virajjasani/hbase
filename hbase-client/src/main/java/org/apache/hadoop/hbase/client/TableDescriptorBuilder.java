@@ -27,25 +27,27 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Function;
 import java.util.regex.Matcher;
-import java.util.stream.Stream;
-
+import java.util.regex.Pattern;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Coprocessor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.security.User;
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 
 /**
  * @since 2.0.0
@@ -89,6 +91,22 @@ public class TableDescriptorBuilder {
   public static final String COMPACTION_ENABLED = "COMPACTION_ENABLED";
   private static final Bytes COMPACTION_ENABLED_KEY
           = new Bytes(Bytes.toBytes(COMPACTION_ENABLED));
+
+  /**
+   * Used by HBase Shell interface to access this metadata
+   * attribute which denotes if the table is split enabled.
+   */
+  @InterfaceAudience.Private
+  public static final String SPLIT_ENABLED = "SPLIT_ENABLED";
+  private static final Bytes SPLIT_ENABLED_KEY = new Bytes(Bytes.toBytes(SPLIT_ENABLED));
+
+  /**
+   * Used by HBase Shell interface to access this metadata
+   * attribute which denotes if the table is merge enabled.
+   */
+  @InterfaceAudience.Private
+  public static final String MERGE_ENABLED = "MERGE_ENABLED";
+  private static final Bytes MERGE_ENABLED_KEY = new Bytes(Bytes.toBytes(MERGE_ENABLED));
 
   /**
    * Used by HBase Shell interface to access this metadata
@@ -149,6 +167,17 @@ public class TableDescriptorBuilder {
   private static final Bytes NORMALIZATION_ENABLED_KEY
           = new Bytes(Bytes.toBytes(NORMALIZATION_ENABLED));
 
+  @InterfaceAudience.Private
+  public static final String NORMALIZER_TARGET_REGION_COUNT =
+      "NORMALIZER_TARGET_REGION_COUNT";
+  private static final Bytes NORMALIZER_TARGET_REGION_COUNT_KEY =
+      new Bytes(Bytes.toBytes(NORMALIZER_TARGET_REGION_COUNT));
+
+  @InterfaceAudience.Private
+  public static final String NORMALIZER_TARGET_REGION_SIZE = "NORMALIZER_TARGET_REGION_SIZE";
+  private static final Bytes NORMALIZER_TARGET_REGION_SIZE_KEY =
+      new Bytes(Bytes.toBytes(NORMALIZER_TARGET_REGION_SIZE));
+
   /**
    * Default durability for HTD is USE_DEFAULT, which defaults to HBase-global
    * default value
@@ -176,13 +205,23 @@ public class TableDescriptorBuilder {
   public static final boolean DEFAULT_COMPACTION_ENABLED = true;
 
   /**
+   * Constant that denotes whether the table is split enabled by default
+   */
+  public static final boolean DEFAULT_SPLIT_ENABLED = true;
+
+  /**
+   * Constant that denotes whether the table is merge enabled by default
+   */
+  public static final boolean DEFAULT_MERGE_ENABLED = true;
+
+  /**
    * Constant that denotes whether the table is normalized by default.
    */
   public static final boolean DEFAULT_NORMALIZATION_ENABLED = false;
 
   /**
-   * Constant that denotes the maximum default size of the memstore after which
-   * the contents are flushed to the store files
+   * Constant that denotes the maximum default size of the memstore in bytes after which
+   * the contents are flushed to the store files.
    */
   public static final long DEFAULT_MEMSTORE_FLUSH_SIZE = 1024 * 1024 * 128L;
 
@@ -216,6 +255,24 @@ public class TableDescriptorBuilder {
   public final static byte[] NAMESPACE_COL_DESC_BYTES = Bytes.toBytes("d");
 
   /**
+   * <pre>
+   * Pattern that matches a coprocessor specification. Form is:
+   * {@code <coprocessor jar file location> '|' <class name> ['|' <priority> ['|' <arguments>]]}
+   * where arguments are {@code <KEY> '=' <VALUE> [,...]}
+   * For example: {@code hdfs:///foo.jar|com.foo.FooRegionObserver|1001|arg1=1,arg2=2}
+   * </pre>
+   */
+  private static final Pattern CP_HTD_ATTR_VALUE_PATTERN =
+    Pattern.compile("(^[^\\|]*)\\|([^\\|]+)\\|[\\s]*([\\d]*)[\\s]*(\\|.*)?$");
+
+  private static final String CP_HTD_ATTR_VALUE_PARAM_KEY_PATTERN = "[^=,]+";
+  private static final String CP_HTD_ATTR_VALUE_PARAM_VALUE_PATTERN = "[^,]+";
+  private static final Pattern CP_HTD_ATTR_VALUE_PARAM_PATTERN = Pattern.compile(
+    "(" + CP_HTD_ATTR_VALUE_PARAM_KEY_PATTERN + ")=(" +
+      CP_HTD_ATTR_VALUE_PARAM_VALUE_PATTERN + "),?");
+  private static final Pattern CP_HTD_ATTR_KEY_PATTERN =
+    Pattern.compile("^coprocessor\\$([0-9]+)$", Pattern.CASE_INSENSITIVE);
+  /**
    * Table descriptor for namespace table
    */
   // TODO We used to set CacheDataInL1 for NS table. When we have BucketCache in file mode, now the
@@ -223,14 +280,14 @@ public class TableDescriptorBuilder {
   // rethink about adding back the setCacheDataInL1 for NS table.
   public static final TableDescriptor NAMESPACE_TABLEDESC
     = TableDescriptorBuilder.newBuilder(TableName.NAMESPACE_TABLE_NAME)
-                            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(NAMESPACE_FAMILY_INFO_BYTES)
-                              // Ten is arbitrary number.  Keep versions to help debugging.
-                              .setMaxVersions(10)
-                              .setInMemory(true)
-                              .setBlocksize(8 * 1024)
-                              .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
-                              .build())
-                            .build();
+      .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(NAMESPACE_FAMILY_INFO_BYTES)
+        // Ten is arbitrary number.  Keep versions to help debugging.
+        .setMaxVersions(10)
+        .setInMemory(true)
+        .setBlocksize(8 * 1024)
+        .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
+        .build())
+      .build();
   private final ModifyableTableDescriptor desc;
 
   /**
@@ -283,28 +340,81 @@ public class TableDescriptorBuilder {
     this.desc = new ModifyableTableDescriptor(desc);
   }
 
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *                       Use {@link #setCoprocessor(String)} instead
+   */
+  @Deprecated
   public TableDescriptorBuilder addCoprocessor(String className) throws IOException {
     return addCoprocessor(className, null, Coprocessor.PRIORITY_USER, null);
   }
 
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *                       Use {@link #setCoprocessor(CoprocessorDescriptor)} instead
+   */
+  @Deprecated
   public TableDescriptorBuilder addCoprocessor(String className, Path jarFilePath,
-          int priority, final Map<String, String> kvs) throws IOException {
-    desc.addCoprocessor(className, jarFilePath, priority, kvs);
+    int priority, final Map<String, String> kvs) throws IOException {
+    desc.setCoprocessor(
+      CoprocessorDescriptorBuilder.newBuilder(className)
+        .setJarPath(jarFilePath == null ? null : jarFilePath.toString())
+        .setPriority(priority)
+        .setProperties(kvs == null ? Collections.emptyMap() : kvs)
+        .build());
     return this;
   }
 
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *                       Use {@link #setCoprocessor(CoprocessorDescriptor)} instead
+   */
+  @Deprecated
   public TableDescriptorBuilder addCoprocessorWithSpec(final String specStr) throws IOException {
-    desc.addCoprocessorWithSpec(specStr);
+    desc.setCoprocessorWithSpec(specStr);
     return this;
   }
 
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *                       Use {@link #setColumnFamily(ColumnFamilyDescriptor)} instead
+   */
+  @Deprecated
   public TableDescriptorBuilder addColumnFamily(final ColumnFamilyDescriptor family) {
-    desc.addColumnFamily(family);
+    desc.setColumnFamily(family);
+    return this;
+  }
+
+  public TableDescriptorBuilder setCoprocessor(String className) throws IOException {
+    return setCoprocessor(CoprocessorDescriptorBuilder.of(className));
+  }
+
+  public TableDescriptorBuilder setCoprocessor(CoprocessorDescriptor cpDesc) throws IOException {
+    desc.setCoprocessor(Objects.requireNonNull(cpDesc));
+    return this;
+  }
+
+  public TableDescriptorBuilder setCoprocessors(Collection<CoprocessorDescriptor> cpDescs)
+    throws IOException {
+    for (CoprocessorDescriptor cpDesc : cpDescs) {
+      desc.setCoprocessor(cpDesc);
+    }
+    return this;
+  }
+
+  public TableDescriptorBuilder setColumnFamily(final ColumnFamilyDescriptor family) {
+    desc.setColumnFamily(Objects.requireNonNull(family));
+    return this;
+  }
+
+  public TableDescriptorBuilder setColumnFamilies(
+    final Collection<ColumnFamilyDescriptor> families) {
+    families.forEach(desc::setColumnFamily);
     return this;
   }
 
   public TableDescriptorBuilder modifyColumnFamily(final ColumnFamilyDescriptor family) {
-    desc.modifyColumnFamily(family);
+    desc.modifyColumnFamily(Objects.requireNonNull(family));
     return this;
   }
 
@@ -333,6 +443,16 @@ public class TableDescriptorBuilder {
     return this;
   }
 
+  public TableDescriptorBuilder setSplitEnabled(final boolean isEnable) {
+    desc.setSplitEnabled(isEnable);
+    return this;
+  }
+
+  public TableDescriptorBuilder setMergeEnabled(final boolean isEnable) {
+    desc.setMergeEnabled(isEnable);
+    return this;
+  }
+
   public TableDescriptorBuilder setDurability(Durability durability) {
     desc.setDurability(durability);
     return this;
@@ -353,17 +473,35 @@ public class TableDescriptorBuilder {
     return this;
   }
 
+  public TableDescriptorBuilder setNormalizerTargetRegionCount(final int regionCount) {
+    desc.setNormalizerTargetRegionCount(regionCount);
+    return this;
+  }
+
+  public TableDescriptorBuilder setNormalizerTargetRegionSize(final long regionSize) {
+    desc.setNormalizerTargetRegionSize(regionSize);
+    return this;
+  }
+
   public TableDescriptorBuilder setNormalizationEnabled(final boolean isEnable) {
     desc.setNormalizationEnabled(isEnable);
     return this;
   }
 
+  /**
+   * @deprecated since 2.0.0 and will be removed in 3.0.0.
+   * @see <a href="https://issues.apache.org/jira/browse/HBASE-15583">HBASE-15583</a>
+   */
   @Deprecated
   public TableDescriptorBuilder setOwner(User owner) {
     desc.setOwner(owner);
     return this;
   }
 
+  /**
+   * @deprecated since 2.0.0 and will be removed in 3.0.0.
+   * @see <a href="https://issues.apache.org/jira/browse/HBASE-15583">HBASE-15583</a>
+   */
   @Deprecated
   public TableDescriptorBuilder setOwnerString(String ownerString) {
     desc.setOwnerString(ownerString);
@@ -422,7 +560,7 @@ public class TableDescriptorBuilder {
     newFamilies
         .forEach((cf, cfDesc) -> {
           desc.removeColumnFamily(cf);
-          desc.addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(cfDesc).setScope(scope)
+          desc.setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(cfDesc).setScope(scope)
               .build());
         });
     return this;
@@ -672,6 +810,48 @@ public class TableDescriptorBuilder {
     }
 
     /**
+     * Check if the split enable flag of the table is true. If flag is false then no split will be
+     * done.
+     *
+     * @return true if table region split enabled
+     */
+    @Override
+    public boolean isSplitEnabled() {
+      return getOrDefault(SPLIT_ENABLED_KEY, Boolean::valueOf, DEFAULT_SPLIT_ENABLED);
+    }
+
+    /**
+     * Setting the table region split enable flag.
+     * @param isEnable True if enable region split.
+     *
+     * @return the modifyable TD
+     */
+    public ModifyableTableDescriptor setSplitEnabled(final boolean isEnable) {
+      return setValue(SPLIT_ENABLED_KEY, Boolean.toString(isEnable));
+    }
+
+    /**
+     * Check if the region merge enable flag of the table is true. If flag is false then no merge
+     * will be done.
+     *
+     * @return true if table region merge enabled
+     */
+    @Override
+    public boolean isMergeEnabled() {
+      return getOrDefault(MERGE_ENABLED_KEY, Boolean::valueOf, DEFAULT_MERGE_ENABLED);
+    }
+
+    /**
+     * Setting the table region merge enable flag.
+     * @param isEnable True if enable region merge.
+     *
+     * @return the modifyable TD
+     */
+    public ModifyableTableDescriptor setMergeEnabled(final boolean isEnable) {
+      return setValue(MERGE_ENABLED_KEY, Boolean.toString(isEnable));
+    }
+
+    /**
      * Check if normalization enable flag of the table is true. If flag is false
      * then no region normalizer won't attempt to normalize this table.
      *
@@ -683,6 +863,27 @@ public class TableDescriptorBuilder {
     }
 
     /**
+     * Check if there is the target region count. If so, the normalize plan will be calculated based
+     * on the target region count.
+     * @return target region count after normalize done
+     */
+    @Override
+    public int getNormalizerTargetRegionCount() {
+      return getOrDefault(NORMALIZER_TARGET_REGION_COUNT_KEY, Integer::valueOf,
+        Integer.valueOf(-1));
+    }
+
+    /**
+     * Check if there is the target region size. If so, the normalize plan will be calculated based
+     * on the target region size.
+     * @return target region size after normalize done
+     */
+    @Override
+    public long getNormalizerTargetRegionSize() {
+      return getOrDefault(NORMALIZER_TARGET_REGION_SIZE_KEY, Long::valueOf, Long.valueOf(-1));
+    }
+
+    /**
      * Setting the table normalization enable flag.
      *
      * @param isEnable True if enable normalization.
@@ -690,6 +891,24 @@ public class TableDescriptorBuilder {
      */
     public ModifyableTableDescriptor setNormalizationEnabled(final boolean isEnable) {
       return setValue(NORMALIZATION_ENABLED_KEY, Boolean.toString(isEnable));
+    }
+
+    /**
+     * Setting the target region count of table normalization .
+     * @param regionCount the target region count.
+     * @return the modifyable TD
+     */
+    public ModifyableTableDescriptor setNormalizerTargetRegionCount(final int regionCount) {
+      return setValue(NORMALIZER_TARGET_REGION_COUNT_KEY, Integer.toString(regionCount));
+    }
+
+    /**
+     * Setting the target region size of table normalization.
+     * @param regionSize the target region size.
+     * @return the modifyable TD
+     */
+    public ModifyableTableDescriptor setNormalizerTargetRegionSize(final long regionSize) {
+      return setValue(NORMALIZER_TARGET_REGION_SIZE_KEY, Long.toString(regionSize));
     }
 
     /**
@@ -840,7 +1059,7 @@ public class TableDescriptorBuilder {
      * @param family to add.
      * @return the modifyable TD
      */
-    public ModifyableTableDescriptor addColumnFamily(final ColumnFamilyDescriptor family) {
+    public ModifyableTableDescriptor setColumnFamily(final ColumnFamilyDescriptor family) {
       if (family.getName() == null || family.getName().length <= 0) {
         throw new IllegalArgumentException("Family name cannot be null or empty");
       }
@@ -900,6 +1119,7 @@ public class TableDescriptorBuilder {
      * @return Name of this table and then a map of all of the column family
      * descriptors (with only the non-default column family attributes)
      */
+    @Override
     public String toStringCustomizedValues() {
       StringBuilder s = new StringBuilder();
       s.append('\'').append(Bytes.toString(name.getName())).append('\'');
@@ -1055,16 +1275,6 @@ public class TableDescriptorBuilder {
     }
 
     /**
-     * Return true if there are at least one cf whose replication scope is
-     * serial.
-     */
-    @Override
-    public boolean hasSerialReplicationScope() {
-      return Stream.of(getColumnFamilies())
-              .anyMatch(column -> column.getScope() == HConstants.REPLICATION_SCOPE_SERIAL);
-    }
-
-    /**
      * Returns the configured replicas per region
      */
     @Override
@@ -1165,8 +1375,10 @@ public class TableDescriptorBuilder {
      * @throws IOException
      * @return the modifyable TD
      */
-    public ModifyableTableDescriptor addCoprocessor(String className) throws IOException {
-      return addCoprocessor(className, null, Coprocessor.PRIORITY_USER, null);
+    public ModifyableTableDescriptor setCoprocessor(String className) throws IOException {
+      return setCoprocessor(
+        CoprocessorDescriptorBuilder.newBuilder(className).setPriority(Coprocessor.PRIORITY_USER)
+          .build());
     }
 
     /**
@@ -1175,44 +1387,38 @@ public class TableDescriptorBuilder {
      * check if the class can be loaded or not. Whether a coprocessor is
      * loadable or not will be determined when a region is opened.
      *
-     * @param jarFilePath Path of the jar file. If it's null, the class will be
-     * loaded from default classloader.
-     * @param className Full class name.
-     * @param priority Priority
-     * @param kvs Arbitrary key-value parameter pairs passed into the
-     * coprocessor.
-     * @throws IOException
+     * @throws IOException any illegal parameter key/value
      * @return the modifyable TD
      */
-    public ModifyableTableDescriptor addCoprocessor(String className, Path jarFilePath,
-            int priority, final Map<String, String> kvs)
+    public ModifyableTableDescriptor setCoprocessor(CoprocessorDescriptor cp)
             throws IOException {
-      checkHasCoprocessor(className);
-
+      checkHasCoprocessor(cp.getClassName());
+      if (cp.getPriority() < 0) {
+        throw new IOException("Priority must be bigger than or equal with zero, current:"
+          + cp.getPriority());
+      }
       // Validate parameter kvs and then add key/values to kvString.
       StringBuilder kvString = new StringBuilder();
-      if (kvs != null) {
-        for (Map.Entry<String, String> e : kvs.entrySet()) {
-          if (!e.getKey().matches(HConstants.CP_HTD_ATTR_VALUE_PARAM_KEY_PATTERN)) {
-            throw new IOException("Illegal parameter key = " + e.getKey());
-          }
-          if (!e.getValue().matches(HConstants.CP_HTD_ATTR_VALUE_PARAM_VALUE_PATTERN)) {
-            throw new IOException("Illegal parameter (" + e.getKey()
-                    + ") value = " + e.getValue());
-          }
-          if (kvString.length() != 0) {
-            kvString.append(',');
-          }
-          kvString.append(e.getKey());
-          kvString.append('=');
-          kvString.append(e.getValue());
+      for (Map.Entry<String, String> e : cp.getProperties().entrySet()) {
+        if (!e.getKey().matches(CP_HTD_ATTR_VALUE_PARAM_KEY_PATTERN)) {
+          throw new IOException("Illegal parameter key = " + e.getKey());
         }
+        if (!e.getValue().matches(CP_HTD_ATTR_VALUE_PARAM_VALUE_PATTERN)) {
+          throw new IOException("Illegal parameter (" + e.getKey()
+                  + ") value = " + e.getValue());
+        }
+        if (kvString.length() != 0) {
+          kvString.append(',');
+        }
+        kvString.append(e.getKey());
+        kvString.append('=');
+        kvString.append(e.getValue());
       }
 
-      String value = ((jarFilePath == null) ? "" : jarFilePath.toString())
-              + "|" + className + "|" + Integer.toString(priority) + "|"
+      String value = cp.getJarPath().orElse("")
+              + "|" + cp.getClassName() + "|" + Integer.toString(cp.getPriority()) + "|"
               + kvString.toString();
-      return addCoprocessorToMap(value);
+      return setCoprocessorToMap(value);
     }
 
     /**
@@ -1222,18 +1428,19 @@ public class TableDescriptorBuilder {
      * loadable or not will be determined when a region is opened.
      *
      * @param specStr The Coprocessor specification all in in one String
-     * formatted so matches {@link HConstants#CP_HTD_ATTR_VALUE_PATTERN}
      * @throws IOException
      * @return the modifyable TD
+     * @deprecated used by HTableDescriptor and admin.rb.
+     *                       As of release 2.0.0, this will be removed in HBase 3.0.0.
      */
-    public ModifyableTableDescriptor addCoprocessorWithSpec(final String specStr) throws IOException {
-      String className = getCoprocessorClassNameFromSpecStr(specStr);
-      if (className == null) {
-        throw new IllegalArgumentException("Format does not match "
-                + HConstants.CP_HTD_ATTR_VALUE_PATTERN + ": " + specStr);
-      }
-      checkHasCoprocessor(className);
-      return addCoprocessorToMap(specStr);
+    @Deprecated
+    public ModifyableTableDescriptor setCoprocessorWithSpec(final String specStr)
+      throws IOException {
+      CoprocessorDescriptor cpDesc = toCoprocessorDescriptor(specStr).orElseThrow(
+        () -> new IllegalArgumentException(
+          "Format does not match " + CP_HTD_ATTR_VALUE_PATTERN + ": " + specStr));
+      checkHasCoprocessor(cpDesc.getClassName());
+      return setCoprocessorToMap(specStr);
     }
 
     private void checkHasCoprocessor(final String className) throws IOException {
@@ -1244,12 +1451,10 @@ public class TableDescriptorBuilder {
 
     /**
      * Add coprocessor to values Map
-     *
      * @param specStr The Coprocessor specification all in in one String
-     * formatted so matches {@link HConstants#CP_HTD_ATTR_VALUE_PATTERN}
      * @return Returns <code>this</code>
      */
-    private ModifyableTableDescriptor addCoprocessorToMap(final String specStr) {
+    private ModifyableTableDescriptor setCoprocessorToMap(final String specStr) {
       if (specStr == null) {
         return this;
       }
@@ -1257,7 +1462,7 @@ public class TableDescriptorBuilder {
       int maxCoprocessorNumber = 0;
       Matcher keyMatcher;
       for (Map.Entry<Bytes, Bytes> e : this.values.entrySet()) {
-        keyMatcher = HConstants.CP_HTD_ATTR_KEY_PATTERN.matcher(Bytes.toString(e.getKey().get()));
+        keyMatcher = CP_HTD_ATTR_KEY_PATTERN.matcher(Bytes.toString(e.getKey().get()));
         if (!keyMatcher.matches()) {
           continue;
         }
@@ -1277,24 +1482,8 @@ public class TableDescriptorBuilder {
      */
     @Override
     public boolean hasCoprocessor(String classNameToMatch) {
-      Matcher keyMatcher;
-      for (Map.Entry<Bytes, Bytes> e
-              : this.values.entrySet()) {
-        keyMatcher
-                = HConstants.CP_HTD_ATTR_KEY_PATTERN.matcher(
-                        Bytes.toString(e.getKey().get()));
-        if (!keyMatcher.matches()) {
-          continue;
-        }
-        String className = getCoprocessorClassNameFromSpecStr(Bytes.toString(e.getValue().get()));
-        if (className == null) {
-          continue;
-        }
-        if (className.equals(classNameToMatch.trim())) {
-          return true;
-        }
-      }
-      return false;
+      return getCoprocessorDescriptors().stream().anyMatch(cp -> cp.getClassName()
+        .equals(classNameToMatch));
     }
 
     /**
@@ -1304,33 +1493,16 @@ public class TableDescriptorBuilder {
      * @return The list of co-processors classNames
      */
     @Override
-    public List<String> getCoprocessors() {
-      List<String> result = new ArrayList<>(this.values.entrySet().size());
-      Matcher keyMatcher;
-      for (Map.Entry<Bytes, Bytes> e : this.values.entrySet()) {
-        keyMatcher = HConstants.CP_HTD_ATTR_KEY_PATTERN.matcher(Bytes.toString(e.getKey().get()));
-        if (!keyMatcher.matches()) {
-          continue;
+    public List<CoprocessorDescriptor> getCoprocessorDescriptors() {
+      List<CoprocessorDescriptor> result = new ArrayList<>();
+      for (Map.Entry<Bytes, Bytes> e: getValues().entrySet()) {
+        String key = Bytes.toString(e.getKey().get()).trim();
+        if (CP_HTD_ATTR_KEY_PATTERN.matcher(key).matches()) {
+          toCoprocessorDescriptor(Bytes.toString(e.getValue().get()).trim())
+            .ifPresent(result::add);
         }
-        String className = getCoprocessorClassNameFromSpecStr(Bytes.toString(e.getValue().get()));
-        if (className == null) {
-          continue;
-        }
-        result.add(className); // classname is the 2nd field
       }
       return result;
-    }
-
-    /**
-     * @param spec String formatted as per
-     * {@link HConstants#CP_HTD_ATTR_VALUE_PATTERN}
-     * @return Class parsed from passed in <code>spec</code> or null if no match
-     * or classpath found
-     */
-    private static String getCoprocessorClassNameFromSpecStr(final String spec) {
-      Matcher matcher = HConstants.CP_HTD_ATTR_VALUE_PATTERN.matcher(spec);
-      // Classname is the 2nd field
-      return matcher != null && matcher.matches() ? matcher.group(2).trim() : null;
     }
 
     /**
@@ -1344,12 +1516,12 @@ public class TableDescriptorBuilder {
       Matcher valueMatcher;
       for (Map.Entry<Bytes, Bytes> e : this.values
               .entrySet()) {
-        keyMatcher = HConstants.CP_HTD_ATTR_KEY_PATTERN.matcher(Bytes.toString(e
+        keyMatcher = CP_HTD_ATTR_KEY_PATTERN.matcher(Bytes.toString(e
                 .getKey().get()));
         if (!keyMatcher.matches()) {
           continue;
         }
-        valueMatcher = HConstants.CP_HTD_ATTR_VALUE_PATTERN.matcher(Bytes
+        valueMatcher = CP_HTD_ATTR_VALUE_PATTERN.matcher(Bytes
                 .toString(e.getValue().get()));
         if (!valueMatcher.matches()) {
           continue;
@@ -1368,17 +1540,29 @@ public class TableDescriptorBuilder {
       }
     }
 
+    /**
+     * @deprecated since 2.0.0 and will be removed in 3.0.0.
+     * @see <a href="https://issues.apache.org/jira/browse/HBASE-15583">HBASE-15583</a>
+     */
     @Deprecated
     public ModifyableTableDescriptor setOwner(User owner) {
       return setOwnerString(owner != null ? owner.getShortName() : null);
     }
 
+    /**
+     * @deprecated since 2.0.0 and will be removed in 3.0.0.
+     * @see <a href="https://issues.apache.org/jira/browse/HBASE-15583">HBASE-15583</a>
+     */
     // used by admin.rb:alter(table_name,*args) to update owner.
     @Deprecated
     public ModifyableTableDescriptor setOwnerString(String ownerString) {
       return setValue(OWNER_KEY, ownerString);
     }
 
+    /**
+     * @deprecated since 2.0.0 and will be removed in 3.0.0.
+     * @see <a href="https://issues.apache.org/jira/browse/HBASE-15583">HBASE-15583</a>
+     */
     @Override
     @Deprecated
     public String getOwnerString() {
@@ -1424,4 +1608,40 @@ public class TableDescriptorBuilder {
     }
   }
 
+  private static Optional<CoprocessorDescriptor> toCoprocessorDescriptor(String spec) {
+    Matcher matcher = CP_HTD_ATTR_VALUE_PATTERN.matcher(spec);
+    if (matcher.matches()) {
+      // jar file path can be empty if the cp class can be loaded
+      // from class loader.
+      String path = matcher.group(1).trim().isEmpty() ?
+        null : matcher.group(1).trim();
+      String className = matcher.group(2).trim();
+      if (className.isEmpty()) {
+        return Optional.empty();
+      }
+      String priorityStr = matcher.group(3).trim();
+      int priority = priorityStr.isEmpty() ?
+        Coprocessor.PRIORITY_USER : Integer.parseInt(priorityStr);
+      String cfgSpec = null;
+      try {
+        cfgSpec = matcher.group(4);
+      } catch (IndexOutOfBoundsException ex) {
+        // ignore
+      }
+      Map<String, String> ourConf = new TreeMap<>();
+      if (cfgSpec != null && !cfgSpec.trim().equals("|")) {
+        cfgSpec = cfgSpec.substring(cfgSpec.indexOf('|') + 1);
+        Matcher m = CP_HTD_ATTR_VALUE_PARAM_PATTERN.matcher(cfgSpec);
+        while (m.find()) {
+          ourConf.put(m.group(1), m.group(2));
+        }
+      }
+      return Optional.of(CoprocessorDescriptorBuilder.newBuilder(className)
+        .setJarPath(path)
+        .setPriority(priority)
+        .setProperties(ourConf)
+        .build());
+    }
+    return Optional.empty();
+  }
 }

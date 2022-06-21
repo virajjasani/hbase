@@ -156,4 +156,14 @@ public class PrefixFilter extends FilterBase {
   public String toString() {
     return this.getClass().getSimpleName() + " " + Bytes.toStringBinary(this.prefix);
   }
+
+  @Override
+  public boolean equals(Object obj) {
+    return obj instanceof Filter && areSerializedFieldsEqual((Filter) obj);
+  }
+
+  @Override
+  public int hashCode() {
+    return Bytes.hashCode(this.getPrefix());
+  }
 }

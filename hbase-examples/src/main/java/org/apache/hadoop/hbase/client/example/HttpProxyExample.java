@@ -17,11 +17,11 @@
  */
 package org.apache.hadoop.hbase.client.example;
 
+import static org.apache.hadoop.hbase.util.FutureUtils.addListener;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.util.Optional;
 import java.util.concurrent.ExecutionException;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.TableName;
@@ -31,6 +31,7 @@ import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.ipc.NettyRpcClientConfigHelper;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.yetus.audience.InterfaceAudience;
 
 import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 import org.apache.hbase.thirdparty.com.google.common.base.Throwables;
@@ -71,6 +72,7 @@ import org.apache.hbase.thirdparty.io.netty.util.concurrent.GlobalEventExecutor;
  * Use HTTP GET to fetch data, and use HTTP PUT to put data. Encode the value as the request content
  * when doing PUT.
  */
+@InterfaceAudience.Private
 public class HttpProxyExample {
 
   private final EventLoopGroup bossGroup = new NioEventLoopGroup(1);
@@ -132,12 +134,15 @@ public class HttpProxyExample {
       ctx.fireChannelInactive();
     }
 
+    private void write(ChannelHandlerContext ctx, HttpResponseStatus status) {
+      write(ctx, status, null);
+    }
+
     private void write(ChannelHandlerContext ctx, HttpResponseStatus status,
-        Optional<String> content) {
+        String content) {
       DefaultFullHttpResponse resp;
-      if (content.isPresent()) {
-        ByteBuf buf =
-            ctx.alloc().buffer().writeBytes(Bytes.toBytes(content.get()));
+      if (content != null) {
+        ByteBuf buf = ctx.alloc().buffer().writeBytes(Bytes.toBytes(content));
         resp = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status, buf);
         resp.headers().set(HttpHeaderNames.CONTENT_LENGTH, buf.readableBytes());
       } else {
@@ -158,36 +163,38 @@ public class HttpProxyExample {
 
     private void get(ChannelHandlerContext ctx, FullHttpRequest req) {
       Params params = parse(req);
-      conn.getTable(TableName.valueOf(params.table)).get(new Get(Bytes.toBytes(params.row))
-          .addColumn(Bytes.toBytes(params.family), Bytes.toBytes(params.qualifier)))
-          .whenComplete((r, e) -> {
-            if (e != null) {
-              exceptionCaught(ctx, e);
+      addListener(
+        conn.getTable(TableName.valueOf(params.table)).get(new Get(Bytes.toBytes(params.row))
+          .addColumn(Bytes.toBytes(params.family), Bytes.toBytes(params.qualifier))),
+        (r, e) -> {
+          if (e != null) {
+            exceptionCaught(ctx, e);
+          } else {
+            byte[] value =
+              r.getValue(Bytes.toBytes(params.family), Bytes.toBytes(params.qualifier));
+            if (value != null) {
+              write(ctx, HttpResponseStatus.OK, Bytes.toStringBinary(value));
             } else {
-              byte[] value =
-                  r.getValue(Bytes.toBytes(params.family), Bytes.toBytes(params.qualifier));
-              if (value != null) {
-                write(ctx, HttpResponseStatus.OK, Optional.of(Bytes.toStringBinary(value)));
-              } else {
-                write(ctx, HttpResponseStatus.NOT_FOUND, Optional.empty());
-              }
+              write(ctx, HttpResponseStatus.NOT_FOUND);
             }
-          });
+          }
+        });
     }
 
     private void put(ChannelHandlerContext ctx, FullHttpRequest req) {
       Params params = parse(req);
       byte[] value = new byte[req.content().readableBytes()];
       req.content().readBytes(value);
-      conn.getTable(TableName.valueOf(params.table)).put(new Put(Bytes.toBytes(params.row))
-          .addColumn(Bytes.toBytes(params.family), Bytes.toBytes(params.qualifier), value))
-          .whenComplete((r, e) -> {
-            if (e != null) {
-              exceptionCaught(ctx, e);
-            } else {
-              write(ctx, HttpResponseStatus.OK, Optional.empty());
-            }
-          });
+      addListener(
+        conn.getTable(TableName.valueOf(params.table)).put(new Put(Bytes.toBytes(params.row))
+          .addColumn(Bytes.toBytes(params.family), Bytes.toBytes(params.qualifier), value)),
+        (r, e) -> {
+          if (e != null) {
+            exceptionCaught(ctx, e);
+          } else {
+            write(ctx, HttpResponseStatus.OK);
+          }
+        });
     }
 
     @Override
@@ -200,7 +207,7 @@ public class HttpProxyExample {
           put(ctx, req);
           break;
         default:
-          write(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED, Optional.empty());
+          write(ctx, HttpResponseStatus.METHOD_NOT_ALLOWED);
           break;
       }
     }
@@ -208,10 +215,10 @@ public class HttpProxyExample {
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
       if (cause instanceof IllegalArgumentException) {
-        write(ctx, HttpResponseStatus.BAD_REQUEST, Optional.of(cause.getMessage()));
+        write(ctx, HttpResponseStatus.BAD_REQUEST, cause.getMessage());
       } else {
         write(ctx, HttpResponseStatus.INTERNAL_SERVER_ERROR,
-          Optional.of(Throwables.getStackTraceAsString(cause)));
+          Throwables.getStackTraceAsString(cause));
       }
     }
   }

@@ -53,13 +53,12 @@ public interface LoadBalancer extends Configurable, Stoppable, ConfigurationObse
    * By default, it carries no tables.
    * TODO: Add any | system as flags to indicate what it can do.
    */
-  public static final String TABLES_ON_MASTER = "hbase.balancer.tablesOnMaster";
+  String TABLES_ON_MASTER = "hbase.balancer.tablesOnMaster";
 
   /**
    * Master carries system tables.
    */
-  public static final String SYSTEM_TABLES_ON_MASTER =
-    "hbase.balancer.tablesOnMaster.systemTablesOnly";
+  String SYSTEM_TABLES_ON_MASTER = "hbase.balancer.tablesOnMaster.systemTablesOnly";
 
   // Used to signal to the caller that the region(s) cannot be assigned
   // We deliberately use 'localhost' so the operation will fail fast
@@ -160,6 +159,14 @@ public interface LoadBalancer extends Configurable, Stoppable, ConfigurationObse
   void onConfigurationChange(Configuration conf);
 
   /**
+   * If balancer needs to do initialization after Master has started up, lets do that here.
+   */
+  void postMasterStartupInitialize();
+
+  /*Updates balancer status tag reported to JMX*/
+  void updateBalancerStatus(boolean status);
+
+  /**
    * @return true if Master carries regions
    */
   static boolean isTablesOnMaster(Configuration conf) {
@@ -168,5 +175,9 @@ public interface LoadBalancer extends Configurable, Stoppable, ConfigurationObse
 
   static boolean isSystemTablesOnlyOnMaster(Configuration conf) {
     return conf.getBoolean(SYSTEM_TABLES_ON_MASTER, false);
+  }
+
+  static boolean isMasterCanHostUserRegions(Configuration conf) {
+    return isTablesOnMaster(conf) && !isSystemTablesOnlyOnMaster(conf);
   }
 }

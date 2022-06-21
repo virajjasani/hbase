@@ -101,6 +101,8 @@ public class StoreFileInfo {
   // timestamp on when the file was created, is 0 and ignored for reference or link files
   private long createdTimestamp;
 
+  private long size;
+
   /**
    * Create a Store File Info
    * @param conf the {@link Configuration} to use
@@ -109,6 +111,11 @@ public class StoreFileInfo {
    */
   public StoreFileInfo(final Configuration conf, final FileSystem fs, final Path initialPath)
       throws IOException {
+    this(conf, fs, null, initialPath);
+  }
+
+  private StoreFileInfo(final Configuration conf, final FileSystem fs,
+      final FileStatus fileStatus, final Path initialPath) throws IOException {
     assert fs != null;
     assert initialPath != null;
     assert conf != null;
@@ -136,7 +143,14 @@ public class StoreFileInfo {
               " reference to " + referencePath);
     } else if (isHFile(p)) {
       // HFile
-      this.createdTimestamp = fs.getFileStatus(initialPath).getModificationTime();
+      if (fileStatus != null) {
+        this.createdTimestamp = fileStatus.getModificationTime();
+        this.size = fileStatus.getLen();
+      } else {
+        FileStatus fStatus = fs.getFileStatus(initialPath);
+        this.createdTimestamp = fStatus.getModificationTime();
+        this.size = fStatus.getLen();
+      }
       this.reference = null;
       this.link = null;
     } else {
@@ -152,18 +166,17 @@ public class StoreFileInfo {
    */
   public StoreFileInfo(final Configuration conf, final FileSystem fs, final FileStatus fileStatus)
       throws IOException {
-    this(conf, fs, fileStatus.getPath());
+    this(conf, fs, fileStatus, fileStatus.getPath());
   }
 
   /**
    * Create a Store File Info from an HFileLink
-   * @param conf the {@link Configuration} to use
-   * @param fs The current file system to use.
+   * @param conf The {@link Configuration} to use
+   * @param fs The current file system to use
    * @param fileStatus The {@link FileStatus} of the file
    */
   public StoreFileInfo(final Configuration conf, final FileSystem fs, final FileStatus fileStatus,
-      final HFileLink link)
-      throws IOException {
+      final HFileLink link) {
     this.fs = fs;
     this.conf = conf;
     // initialPath can be null only if we get a link.
@@ -175,21 +188,45 @@ public class StoreFileInfo {
 
   /**
    * Create a Store File Info from an HFileLink
-   * @param conf
-   * @param fs
-   * @param fileStatus
-   * @param reference
-   * @throws IOException
+   * @param conf The {@link Configuration} to use
+   * @param fs The current file system to use
+   * @param fileStatus The {@link FileStatus} of the file
+   * @param reference The reference instance
    */
   public StoreFileInfo(final Configuration conf, final FileSystem fs, final FileStatus fileStatus,
-      final Reference reference)
-      throws IOException {
+      final Reference reference) {
     this.fs = fs;
     this.conf = conf;
     this.initialPath = fileStatus.getPath();
     this.createdTimestamp = fileStatus.getModificationTime();
     this.reference = reference;
     this.link = null;
+  }
+
+  /**
+   * Create a Store File Info from an HFileLink and a Reference
+   * @param conf The {@link Configuration} to use
+   * @param fs The current file system to use
+   * @param fileStatus The {@link FileStatus} of the file
+   * @param reference The reference instance
+   * @param link The link instance
+   */
+  public StoreFileInfo(final Configuration conf, final FileSystem fs, final FileStatus fileStatus,
+      final Reference reference, final HFileLink link) {
+    this.fs = fs;
+    this.conf = conf;
+    this.initialPath = fileStatus.getPath();
+    this.createdTimestamp = fileStatus.getModificationTime();
+    this.reference = reference;
+    this.link = link;
+  }
+
+  /**
+   * Size of the Hfile
+   * @return size
+   */
+  public long getSize() {
+    return size;
   }
 
   /**
@@ -374,7 +411,7 @@ public class StoreFileInfo {
   @Override
   public String toString() {
     return this.getPath() +
-      (isReference() ? "-" + getReferredToFile(this.getPath()) + "-" + reference : "");
+      (isReference() ? "->" + getReferredToFile(this.getPath()) + "-" + reference : "");
   }
 
   /**

@@ -67,11 +67,11 @@ class SyncFuture {
 
   private Thread t;
 
+  private boolean forceSync;
+
   /**
    * Call this method to clear old usage and get it ready for new deploy.
    * @param txid the new transaction id
-   * @param span current span, detached from caller. Don't forget to attach it when resuming after a
-   *          call to {@link #get(long)}.
    * @return this
    */
   synchronized SyncFuture reset(long txid) {
@@ -95,6 +95,15 @@ class SyncFuture {
 
   synchronized long getTxid() {
     return this.txid;
+  }
+
+  synchronized boolean isForceSync() {
+    return forceSync;
+  }
+
+  synchronized SyncFuture setForceSync(boolean forceSync) {
+    this.forceSync = forceSync;
+    return this;
   }
 
   /**

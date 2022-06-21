@@ -19,10 +19,10 @@ package org.apache.hadoop.hbase.security.visibility;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.Objects;
 
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.filter.FilterBase;
 import org.apache.hadoop.hbase.util.ByteRange;
@@ -89,5 +89,23 @@ class VisibilityLabelFilter extends FilterBase {
     this.curQualifier.unset();
     this.curFamilyMaxVersions = 0;
     this.curQualMetVersions = 0;
+  }
+
+  @Override
+  public boolean equals(Object obj) {
+    if (!(obj instanceof VisibilityLabelFilter)) {
+      return false;
+    }
+    if(this == obj){
+      return true;
+    }
+    VisibilityLabelFilter f = (VisibilityLabelFilter)obj;
+    return this.expEvaluator.equals(f.expEvaluator) &&
+      this.cfVsMaxVersions.equals(f.cfVsMaxVersions);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(this.expEvaluator, this.cfVsMaxVersions);
   }
 }

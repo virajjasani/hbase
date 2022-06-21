@@ -27,11 +27,20 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.*;
+import org.apache.hadoop.hbase.CallQueueTooBigException;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
+import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.MultiActionResultTooLarge;
+import org.apache.hadoop.hbase.NotServingRegionException;
+import org.apache.hadoop.hbase.RegionTooBusyException;
+import org.apache.hadoop.hbase.RetryImmediatelyException;
+import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.exceptions.ClientExceptionsUtil;
 import org.apache.hadoop.hbase.exceptions.RegionOpeningException;
-import org.apache.hadoop.hbase.quotas.ThrottlingException;
+import org.apache.hadoop.hbase.quotas.RpcThrottlingException;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.RSRpcServices;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
@@ -193,12 +202,12 @@ public class TestMetaCache {
 
   public static List<Throwable> metaCachePreservingExceptions() {
     return new ArrayList<Throwable>() {{
-      add(new RegionOpeningException(" "));
-      add(new RegionTooBusyException("Some old message"));
-      add(new ThrottlingException(" "));
-      add(new MultiActionResultTooLarge(" "));
-      add(new RetryImmediatelyException(" "));
-      add(new CallQueueTooBigException());
+        add(new RegionOpeningException(" "));
+        add(new RegionTooBusyException("Some old message"));
+        add(new RpcThrottlingException(" "));
+        add(new MultiActionResultTooLarge(" "));
+        add(new RetryImmediatelyException(" "));
+        add(new CallQueueTooBigException());
     }};
   }
 

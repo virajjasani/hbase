@@ -29,6 +29,7 @@ import java.lang.reflect.Modifier;
 import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadLocalRandom;
@@ -37,6 +38,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
@@ -64,6 +67,7 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.JVMClusterUtil;
 import org.apache.hadoop.hbase.util.ManualEnvironmentEdge;
 import org.apache.hadoop.hbase.util.Threads;
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -77,6 +81,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.io.netty.util.ResourceLeakDetector;
+import org.apache.hbase.thirdparty.io.netty.util.ResourceLeakDetector.Level;
 
 /**
  * This class is for testing HBaseConnectionManager features
@@ -108,6 +114,7 @@ public class TestConnectionImplementation {
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
+    ResourceLeakDetector.setLevel(Level.PARANOID);
     TEST_UTIL.getConfiguration().setBoolean(HConstants.STATUS_PUBLISHED, true);
     // Up the handlers; this test needs more than usual.
     TEST_UTIL.getConfiguration().setInt(HConstants.REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT, 10);
@@ -120,6 +127,11 @@ public class TestConnectionImplementation {
   @AfterClass
   public static void tearDownAfterClass() throws Exception {
     TEST_UTIL.shutdownMiniCluster();
+  }
+
+  @After
+  public void tearDown() throws IOException {
+    TEST_UTIL.getAdmin().balancerSwitch(true, true);
   }
 
   @Test
@@ -228,8 +240,8 @@ public class TestConnectionImplementation {
     final ConnectionImplementation hci =  (ConnectionImplementation)TEST_UTIL.getConnection();
     try (RegionLocator l = TEST_UTIL.getConnection().getRegionLocator(tableName)) {
       while (l.getRegionLocation(rk).getPort() != sn.getPort()) {
-        TEST_UTIL.getAdmin().move(l.getRegionLocation(rk).getRegionInfo().
-            getEncodedNameAsBytes(), Bytes.toBytes(sn.toString()));
+        TEST_UTIL.getAdmin().move(l.getRegionLocation(rk).getRegionInfo().getEncodedNameAsBytes(),
+          sn);
         TEST_UTIL.waitUntilNoRegionsInTransition();
         hci.clearRegionCache(tableName);
       }
@@ -280,7 +292,7 @@ public class TestConnectionImplementation {
     TableName tableName = TableName.valueOf("HCM-testConnectionClose" + allowsInterrupt);
     TEST_UTIL.createTable(tableName, FAM_NAM).close();
 
-    boolean previousBalance = TEST_UTIL.getAdmin().setBalancerRunning(false, true);
+    TEST_UTIL.getAdmin().balancerSwitch(false, true);
 
     Configuration c2 = new Configuration(TEST_UTIL.getConfiguration());
     // We want to work on a separate connection.
@@ -345,9 +357,9 @@ public class TestConnectionImplementation {
     RpcClient rpcClient = conn.getRpcClient();
 
     LOG.info("Going to cancel connections. connection=" + conn.toString() + ", sn=" + sn);
-    for (int i = 0; i < 5000; i++) {
+    for (int i = 0; i < 500; i++) {
       rpcClient.cancelConnections(sn);
-      Thread.sleep(5);
+      Thread.sleep(50);
     }
 
     step.compareAndSet(1, 2);
@@ -362,7 +374,6 @@ public class TestConnectionImplementation {
     table.close();
     connection.close();
     Assert.assertTrue("Unexpected exception is " + failed.get(), failed.get() == null);
-    TEST_UTIL.getAdmin().setBalancerRunning(previousBalance, true);
   }
 
   /**
@@ -600,10 +611,7 @@ public class TestConnectionImplementation {
     // Moving. It's possible that we don't have all the regions online at this point, so
     //  the test must depend only on the region we're looking at.
     LOG.info("Move starting region="+toMove.getRegionInfo().getRegionNameAsString());
-    TEST_UTIL.getAdmin().move(
-      toMove.getRegionInfo().getEncodedNameAsBytes(),
-      destServerName.getServerName().getBytes()
-    );
+    TEST_UTIL.getAdmin().move(toMove.getRegionInfo().getEncodedNameAsBytes(), destServerName);
 
     while (destServer.getOnlineRegion(regionName) == null ||
         destServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameBytes) ||
@@ -666,10 +674,8 @@ public class TestConnectionImplementation {
 
     // We move it back to do another test with a scan
     LOG.info("Move starting region=" + toMove.getRegionInfo().getRegionNameAsString());
-    TEST_UTIL.getAdmin().move(
-      toMove.getRegionInfo().getEncodedNameAsBytes(),
-      curServer.getServerName().getServerName().getBytes()
-    );
+    TEST_UTIL.getAdmin().move(toMove.getRegionInfo().getEncodedNameAsBytes(),
+      curServer.getServerName());
 
     while (curServer.getOnlineRegion(regionName) == null ||
         destServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameBytes) ||
@@ -924,10 +930,7 @@ public class TestConnectionImplementation {
        // Moving. It's possible that we don't have all the regions online at this point, so
       //  the test depends only on the region we're looking at.
       LOG.info("Move starting region=" + toMove.getRegionInfo().getRegionNameAsString());
-      TEST_UTIL.getAdmin().move(
-          toMove.getRegionInfo().getEncodedNameAsBytes(),
-          destServerName.getServerName().getBytes()
-      );
+      TEST_UTIL.getAdmin().move(toMove.getRegionInfo().getEncodedNameAsBytes(), destServerName);
 
       while (destServer.getOnlineRegion(regionName) == null ||
           destServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameBytes) ||
@@ -1043,5 +1046,73 @@ public class TestConnectionImplementation {
     TEST_UTIL.deleteTable(tableName);
     table.close();
     connection.close();
+  }
+
+  @Test
+  public void testLocateRegionsWithRegionReplicas() throws IOException {
+    int regionReplication = 3;
+    byte[] family = Bytes.toBytes("cf");
+    TableName tableName = TableName.valueOf(name.getMethodName());
+
+    // Create a table with region replicas
+    TableDescriptorBuilder builder = TableDescriptorBuilder
+      .newBuilder(tableName)
+      .setRegionReplication(regionReplication)
+      .setColumnFamily(ColumnFamilyDescriptorBuilder.of(family));
+    TEST_UTIL.getAdmin().createTable(builder.build());
+
+    try (ConnectionImplementation con = (ConnectionImplementation) ConnectionFactory.
+      createConnection(TEST_UTIL.getConfiguration())) {
+      // Get locations of the regions of the table
+      List<HRegionLocation> locations = con.locateRegions(tableName, false, false);
+
+      // The size of the returned locations should be 3
+      assertEquals(regionReplication, locations.size());
+
+      // The replicaIds of the returned locations should be 0, 1 and 2
+      Set<Integer> expectedReplicaIds = IntStream.range(0, regionReplication).
+        boxed().collect(Collectors.toSet());
+      for (HRegionLocation location : locations) {
+        assertTrue(expectedReplicaIds.remove(location.getRegion().getReplicaId()));
+      }
+    } finally {
+      TEST_UTIL.deleteTable(tableName);
+    }
+  }
+
+  @Test
+  public void testMetaLookupThreadPoolCreated() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    byte[][] FAMILIES = new byte[][] { Bytes.toBytes("foo") };
+    if (TEST_UTIL.getAdmin().tableExists(tableName)) {
+      TEST_UTIL.getAdmin().disableTable(tableName);
+      TEST_UTIL.getAdmin().deleteTable(tableName);
+    }
+    try (Table htable = TEST_UTIL.createTable(tableName, FAMILIES)) {
+      byte[] row = Bytes.toBytes("test");
+      ConnectionImplementation c = ((ConnectionImplementation) TEST_UTIL.getConnection());
+      // check that metalookup pool would get created
+      c.relocateRegion(tableName, row);
+      ExecutorService ex = c.getCurrentMetaLookupPool();
+      assertNotNull(ex);
+    }
+  }
+
+  // There is no assertion, but you need to confirm that there is no resource leak output from netty
+  @Test
+  public void testCancelConnectionMemoryLeak() throws IOException, InterruptedException {
+    TableName tableName = TableName.valueOf(name.getMethodName());
+    TEST_UTIL.createTable(tableName, FAM_NAM).close();
+    TEST_UTIL.getAdmin().balancerSwitch(false, true);
+    try (Connection connection = ConnectionFactory.createConnection(TEST_UTIL.getConfiguration());
+      Table table = connection.getTable(tableName)) {
+      table.get(new Get(Bytes.toBytes("1")));
+      ServerName sn = TEST_UTIL.getRSForFirstRegionInTable(tableName).getServerName();
+      RpcClient rpcClient = ((ConnectionImplementation) connection).getRpcClient();
+      rpcClient.cancelConnections(sn);
+      Thread.sleep(1000);
+      System.gc();
+      Thread.sleep(1000);
+    }
   }
 }

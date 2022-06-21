@@ -45,7 +45,7 @@ import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.util.Bytes;
-import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
+import static org.apache.hadoop.hbase.util.ConcurrentMapUtils.computeIfAbsent;
 import org.apache.hadoop.hbase.util.EnvironmentEdge;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 
@@ -432,9 +432,10 @@ class SimpleRequestController implements RequestController {
      * regions. 3) check the total concurrent tasks. 4) check the concurrent
      * tasks for server.
      *
-     * @param loc
-     * @param heapSizeOfRow
-     * @return
+     * @param loc the destination of data
+     * @param heapSizeOfRow the data size
+     * @return either Include {@link RequestController.ReturnCode} or skip
+     *         {@link RequestController.ReturnCode}
      */
     @Override
     public ReturnCode canTakeOperation(HRegionLocation loc, long heapSizeOfRow) {

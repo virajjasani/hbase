@@ -18,12 +18,12 @@
 package org.apache.hadoop.hbase.filter;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
 import org.apache.hadoop.hbase.ByteBufferKeyValue;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.PrivateCellUtil;
@@ -98,5 +98,12 @@ public class TestComparators {
     comparable = new SubstringComparator("cf");
     assertEquals(0, PrivateCellUtil.compareFamily(bbCell, comparable));
     assertEquals(0, PrivateCellUtil.compareFamily(kv, comparable));
+    // Qualifier starts with
+    kv = new KeyValue(r1, f, q1, v2);
+    assertTrue(PrivateCellUtil.qualifierStartsWith(kv, Bytes.toBytes("q")));
+    assertTrue(PrivateCellUtil.qualifierStartsWith(kv, q1));
+    assertFalse(PrivateCellUtil.qualifierStartsWith(kv, q2));
+    assertFalse(PrivateCellUtil.qualifierStartsWith(kv, Bytes.toBytes("longerthanthequalifier")));
   }
+
 }

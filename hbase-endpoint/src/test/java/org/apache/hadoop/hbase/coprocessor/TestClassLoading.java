@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -22,8 +22,14 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
-import java.io.*;
-import java.util.*;
+import java.io.File;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -34,8 +40,8 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
-import org.apache.hadoop.hbase.RegionLoad;
-import org.apache.hadoop.hbase.ServerLoad;
+import org.apache.hadoop.hbase.RegionMetrics;
+import org.apache.hadoop.hbase.ServerMetrics;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
@@ -47,8 +53,10 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.ClassLoaderTestHelper;
 import org.apache.hadoop.hbase.util.CoprocessorClassLoader;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.junit.*;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.junit.ClassRule;
+import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,7 +66,6 @@ import org.slf4j.LoggerFactory;
  */
 @Category({CoprocessorTests.class, MediumTests.class})
 public class TestClassLoading {
-
   @ClassRule
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestClassLoading.class);
@@ -90,9 +97,7 @@ public class TestClassLoading {
   private static Class<?> masterCoprocessor = TestMasterCoprocessor.class;
 
   private static final String[] regionServerSystemCoprocessors =
-      new String[]{
-      regionServerCoprocessor.getSimpleName()
-  };
+      new String[]{ regionServerCoprocessor.getSimpleName() };
 
   private static final String[] masterRegionServerSystemCoprocessors = new String[] {
       regionCoprocessor1.getSimpleName(), MultiRowMutationEndpoint.class.getSimpleName(),
@@ -203,7 +208,9 @@ public class TestClassLoading {
           found2_k2 = found2_k2 && (conf.get("k2") != null);
           found2_k3 = found2_k3 && (conf.get("k3") != null);
         } else {
-          found2_k1 = found2_k2 = found2_k3 = false;
+          found2_k1 = false;
+          found2_k2 = false;
+          found2_k3 = false;
         }
         regionsActiveClassLoaders
             .put(region, ((CoprocessorHost) region.getCoprocessorHost()).getExternalClassLoaders());
@@ -326,7 +333,7 @@ public class TestClassLoading {
     htd.setValue(cpKey2, cpValue2);
     htd.setValue(cpKey3, cpValue3);
 
-    // add 2 coprocessor by using new htd.addCoprocessor() api
+    // add 2 coprocessor by using new htd.setCoprocessor() api
     htd.addCoprocessor(cpName5, new Path(getLocalPath(jarFile5)),
         Coprocessor.PRIORITY_USER, null);
     Map<String, String> kvs = new HashMap<>();
@@ -482,13 +489,13 @@ public class TestClassLoading {
    * @param tableName : given table.
    * @return subset of all servers.
    */
-  Map<ServerName, ServerLoad> serversForTable(String tableName) {
-    Map<ServerName, ServerLoad> serverLoadHashMap = new HashMap<>();
-    for(Map.Entry<ServerName,ServerLoad> server:
+  Map<ServerName, ServerMetrics> serversForTable(String tableName) {
+    Map<ServerName, ServerMetrics> serverLoadHashMap = new HashMap<>();
+    for(Map.Entry<ServerName, ServerMetrics> server:
         TEST_UTIL.getMiniHBaseCluster().getMaster().getServerManager().
             getOnlineServers().entrySet()) {
-      for( Map.Entry<byte[], RegionLoad> region:
-          server.getValue().getRegionsLoad().entrySet()) {
+      for(Map.Entry<byte[], RegionMetrics> region:
+          server.getValue().getRegionMetrics().entrySet()) {
         if (region.getValue().getNameAsString().equals(tableName)) {
           // this server hosts a region of tableName: add this server..
           serverLoadHashMap.put(server.getKey(),server.getValue());
@@ -501,8 +508,7 @@ public class TestClassLoading {
   }
 
   void assertAllRegionServers(String tableName) throws InterruptedException {
-    Map<ServerName, ServerLoad> servers;
-    String[] actualCoprocessors = null;
+    Map<ServerName, ServerMetrics> servers;
     boolean success = false;
     String[] expectedCoprocessors = regionServerSystemCoprocessors;
     if (tableName == null) {
@@ -513,8 +519,9 @@ public class TestClassLoading {
     }
     for (int i = 0; i < 5; i++) {
       boolean any_failed = false;
-      for(Map.Entry<ServerName,ServerLoad> server: servers.entrySet()) {
-        actualCoprocessors = server.getValue().getRsCoprocessors();
+      for(Map.Entry<ServerName, ServerMetrics> server: servers.entrySet()) {
+        String[] actualCoprocessors =
+          server.getValue().getCoprocessorNames().stream().toArray(size -> new String[size]);
         if (!Arrays.equals(actualCoprocessors, expectedCoprocessors)) {
           LOG.debug("failed comparison: actual: " +
               Arrays.toString(actualCoprocessors) +
@@ -563,6 +570,4 @@ public class TestClassLoading {
     // Now wait a bit longer for the coprocessor hosts to load the CPs
     Thread.sleep(1000);
   }
-
 }
-

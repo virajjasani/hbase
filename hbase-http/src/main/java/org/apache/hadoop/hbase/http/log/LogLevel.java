@@ -18,34 +18,33 @@
 package org.apache.hadoop.hbase.http.log;
 
 import java.io.BufferedReader;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.URL;
 import java.net.URLConnection;
 import java.util.regex.Pattern;
-
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-
 import org.apache.commons.logging.impl.Jdk14Logger;
 import org.apache.commons.logging.impl.Log4JLogger;
+import org.apache.hadoop.hbase.http.HttpServer;
+import org.apache.hadoop.util.ServletUtil;
+import org.apache.log4j.LogManager;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.impl.Log4jLoggerAdapter;
-import org.apache.hadoop.hbase.http.HttpServer;
-import org.apache.hadoop.util.ServletUtil;
-import org.apache.log4j.LogManager;
 
 /**
  * Change log level in runtime.
  */
-@InterfaceStability.Evolving
-public class LogLevel {
+@InterfaceAudience.Private
+public final class LogLevel {
   public static final String USAGES = "\nUsage: General options are:\n"
       + "\t[-getlevel <host:httpPort> <name>]\n"
       + "\t[-setlevel <host:httpPort> <name> <level>]\n";
@@ -107,13 +106,23 @@ public class LogLevel {
           response)) {
         return;
       }
+      response.setContentType("text/html");
+      PrintWriter out;
+      try {
+        String headerPath = "header.jsp?pageTitle=Log Level";
+        request.getRequestDispatcher(headerPath).include(request, response);
+        out = response.getWriter();
+      } catch (FileNotFoundException e) {
+        // in case file is not found fall back to old design
+        out = ServletUtil.initHTML(response, "Log Level");
+      }
+      out.println(FORMS);
 
-      PrintWriter out = ServletUtil.initHTML(response, "Log Level");
       String logName = ServletUtil.getParameter(request, "log");
       String level = ServletUtil.getParameter(request, "level");
 
       if (logName != null) {
-        out.println("<br /><hr /><h3>Results</h3>");
+        out.println("<p>Results:</p>");
         out.println(MARKER
             + "Submitted Log Name: <b>" + logName + "</b><br />");
 
@@ -135,27 +144,47 @@ public class LogLevel {
         }
       }
 
-      out.println(FORMS);
-      out.println(ServletUtil.HTML_TAIL);
+      try {
+        String footerPath = "footer.jsp";
+        out.println("</div>");
+        request.getRequestDispatcher(footerPath).include(request, response);
+      } catch (FileNotFoundException e) {
+        out.println(ServletUtil.HTML_TAIL);
+      }
+      out.close();
     }
 
-    static final String FORMS = "\n<br /><hr /><h3>Get / Set</h3>"
-        + "\n<form>Log: <input type='text' size='50' name='log' /> "
-        + "<input type='submit' value='Get Log Level' />"
-        + "</form>"
-        + "\n<form>Log: <input type='text' size='50' name='log' /> "
-        + "Level: <input type='text' name='level' /> "
-        + "<input type='submit' value='Set Log Level' />"
-        + "</form>";
+    static final String FORMS = "<div class='container-fluid content'>\n"
+        + "<div class='row inner_header'>\n" + "<div class='page-header'>\n"
+        + "<h1>Get/Set Log Level</h1>\n" + "</div>\n" + "</div>\n" + "Actions:" + "<p>"
+        + "<center>\n" + "<table class='table' style='border: 0;' width='95%' >\n" + "<tr>\n"
+        + "<form>\n" + "<td class='centered'>\n"
+        + "<input style='font-size: 12pt; width: 10em' type='submit' value='Get Log Level'"
+        + " class='btn' />\n" + "</td>\n" + "<td style='text-align: center;'>\n"
+        + "<input type='text' name='log' size='50' required='required'"
+        + " placeholder='Log Name (required)' />\n" + "</td>\n" + "<td width=\"40%\">"
+        + "Get the current log level for the specified log name." + "</td>\n" + "</form>\n"
+        + "</tr>\n" + "<tr>\n" + "<form>\n" + "<td class='centered'>\n"
+        + "<input style='font-size: 12pt; width: 10em' type='submit'"
+        + " value='Set Log Level' class='btn' />\n" + "</td>\n"
+        + "<td style='text-align: center;'>\n"
+        + "<input type='text' name='log' size='50' required='required'"
+        + " placeholder='Log Name (required)' />\n"
+        + "<input type='text' name='level' size='50' required='required'"
+        + " placeholder='Log Level (required)' />\n" + "</td>\n" + "<td width=\"40%\" style=\"\">"
+        + "Set the specified log level for the specified log name." + "</td>\n" + "</form>\n"
+        + "</tr>\n" + "</table>\n" + "</center>\n" + "</p>\n" + "<hr/>\n";
 
     private static void process(org.apache.log4j.Logger log, String level,
         PrintWriter out) throws IOException {
       if (level != null) {
         if (!level.equals(org.apache.log4j.Level.toLevel(level).toString())) {
-          out.println(MARKER + "Bad level : <b>" + level + "</b><br />");
+          out.println(MARKER + "<div class='text-danger'>" + "Bad level : <strong>" + level
+              + "</strong><br />" + "</div>");
         } else {
           log.setLevel(org.apache.log4j.Level.toLevel(level));
-          out.println(MARKER + "Setting Level to " + level + " ...<br />");
+          out.println(MARKER + "<div class='text-success'>" + "Setting Level to <strong>" + level
+              + "</strong> ...<br />" + "</div>");
         }
       }
       out.println(MARKER
@@ -174,4 +203,6 @@ public class LogLevel {
       out.println(MARKER + "Effective level: <b>" + lev + "</b><br />");
     }
   }
+
+  private LogLevel() {}
 }

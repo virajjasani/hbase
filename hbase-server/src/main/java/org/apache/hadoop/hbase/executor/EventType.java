@@ -20,15 +20,14 @@ package org.apache.hadoop.hbase.executor;
 import org.apache.yetus.audience.InterfaceAudience;
 
 /**
- * List of all HBase event handler types.  Event types are named by a
- * convention: event type names specify the component from which the event
- * originated and then where its destined -- e.g. RS2ZK_ prefix means the
- * event came from a regionserver destined for zookeeper -- and then what
- * the even is; e.g. REGION_OPENING.
- *
- * <p>We give the enums indices so we can add types later and keep them
- * grouped together rather than have to add them always to the end as we
- * would have to if we used raw enum ordinals.
+ * List of all HBase event handler types.
+ * <p>
+ * Event types are named by a convention: event type names specify the component from which the
+ * event originated and then where its destined -- e.g. RS_ZK_ prefix means the event came from a
+ * regionserver destined for zookeeper -- and then what the even is; e.g. REGION_OPENING.
+ * <p>
+ * We give the enums indices so we can add types later and keep them grouped together rather than
+ * have to add them always to the end as we would have to if we used raw enum ordinals.
  */
 @InterfaceAudience.Private
 public enum EventType {
@@ -141,6 +140,12 @@ public enum EventType {
    * Master asking RS to open a  priority region.
    */
   M_RS_OPEN_PRIORITY_REGION          (26, ExecutorType.RS_OPEN_PRIORITY_REGION),
+  /**
+   * Messages originating from Master to RS.<br>
+   * M_RS_SWITCH_RPC_THROTTLE<br>
+   * Master asking RS to switch rpc throttle state.
+   */
+  M_RS_SWITCH_RPC_THROTTLE(27, ExecutorType.RS_SWITCH_RPC_THROTTLE),
 
   /**
    * Messages originating from Client to Master.<br>
@@ -201,13 +206,13 @@ public enum EventType {
    * C_M_SNAPSHOT_TABLE<br>
    * Client asking Master to snapshot an offline table.
    */
-  C_M_SNAPSHOT_TABLE        (48, ExecutorType.MASTER_TABLE_OPERATIONS),
+  C_M_SNAPSHOT_TABLE        (48, ExecutorType.MASTER_SNAPSHOT_OPERATIONS),
   /**
    * Messages originating from Client to Master.<br>
    * C_M_RESTORE_SNAPSHOT<br>
    * Client asking Master to restore a snapshot.
    */
-  C_M_RESTORE_SNAPSHOT      (49, ExecutorType.MASTER_TABLE_OPERATIONS),
+  C_M_RESTORE_SNAPSHOT      (49, ExecutorType.MASTER_SNAPSHOT_OPERATIONS),
 
   // Updates from master to ZK. This is done by the master and there is
   // nothing to process by either Master or RS
@@ -275,7 +280,14 @@ public enum EventType {
    *
    * RS_COMPACTED_FILES_DISCHARGER
    */
-  RS_COMPACTED_FILES_DISCHARGER (83, ExecutorType.RS_COMPACTED_FILES_DISCHARGER);
+  RS_COMPACTED_FILES_DISCHARGER (83, ExecutorType.RS_COMPACTED_FILES_DISCHARGER),
+
+  /**
+   * RS refresh peer.<br>
+   *
+   * RS_REFRESH_PEER
+   */
+  RS_REFRESH_PEER (84, ExecutorType.RS_REFRESH_PEER);
 
   private final int code;
   private final ExecutorType executor;
@@ -300,11 +312,6 @@ public enum EventType {
       }
     }
     throw new IllegalArgumentException("Unknown code " + code);
-  }
-
-  public boolean isOnlineSchemaChangeSupported() {
-    return this.equals(EventType.C_M_ADD_FAMILY) || this.equals(EventType.C_M_DELETE_FAMILY) ||
-      this.equals(EventType.C_M_MODIFY_FAMILY) || this.equals(EventType.C_M_MODIFY_TABLE);
   }
 
   ExecutorType getExecutorServiceType() {

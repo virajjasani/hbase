@@ -69,7 +69,8 @@ public class NettyRpcServer extends RpcServer {
 
   private final CountDownLatch closed = new CountDownLatch(1);
   private final Channel serverChannel;
-  private final ChannelGroup allChannels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
+  private final ChannelGroup allChannels =
+    new DefaultChannelGroup(GlobalEventExecutor.INSTANCE, true);
 
   public NettyRpcServer(Server server, String name, List<BlockingServiceAndInterface> services,
       InetSocketAddress bindAddress, Configuration conf, RpcScheduler scheduler,
@@ -106,7 +107,7 @@ public class NettyRpcServer extends RpcServer {
         });
     try {
       serverChannel = bootstrap.bind(this.bindAddress).sync().channel();
-      LOG.info("NettyRpcServer bind to address=" + serverChannel.localAddress());
+      LOG.info("Bind to {}", serverChannel.localAddress());
     } catch (InterruptedException e) {
       throw new InterruptedIOException(e.getMessage());
     }
@@ -140,7 +141,7 @@ public class NettyRpcServer extends RpcServer {
     if (!running) {
       return;
     }
-    LOG.info("Stopping server on " + this.bindAddress.getPort());
+    LOG.info("Stopping server on " + this.serverChannel.localAddress());
     if (authTokenSecretMgr != null) {
       authTokenSecretMgr.stop();
       authTokenSecretMgr = null;
@@ -168,8 +169,9 @@ public class NettyRpcServer extends RpcServer {
 
   @Override
   public int getNumOpenConnections() {
+    int channelsCount = allChannels.size();
     // allChannels also contains the server channel, so exclude that from the count.
-    return allChannels.size() - 1;
+    return channelsCount > 0 ? channelsCount - 1 : channelsCount;
   }
 
   @Override

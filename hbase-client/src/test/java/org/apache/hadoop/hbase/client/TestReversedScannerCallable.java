@@ -19,7 +19,6 @@ package org.apache.hadoop.hbase.client;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.ServerName;
@@ -58,13 +57,10 @@ public class TestReversedScannerCallable {
 
   @Before
   public void setUp() throws Exception {
-    byte[] ROW_BEFORE = ConnectionUtils.createCloseRowBefore(ROW);
-
-    Configuration conf = Mockito.mock(Configuration.class);
     HRegionLocation regionLocation = Mockito.mock(HRegionLocation.class);
     ServerName serverName = Mockito.mock(ServerName.class);
 
-    Mockito.when(connection.getConfiguration()).thenReturn(conf);
+    Mockito.when(connection.getConfiguration()).thenReturn(new Configuration());
     Mockito.when(regionLocations.size()).thenReturn(1);
     Mockito.when(regionLocations.getRegionLocation(0)).thenReturn(regionLocation);
     Mockito.when(regionLocation.getHostname()).thenReturn("localhost");

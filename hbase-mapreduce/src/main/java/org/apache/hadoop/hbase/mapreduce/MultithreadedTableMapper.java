@@ -22,7 +22,6 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
@@ -39,6 +38,7 @@ import org.apache.hadoop.mapreduce.StatusReporter;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.TaskAttemptID;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,6 +57,7 @@ import org.slf4j.LoggerFactory;
  * <p>
  */
 
+@InterfaceAudience.Private
 public class MultithreadedTableMapper<K2, V2> extends TableMapper<K2, V2> {
   private static final Logger LOG = LoggerFactory.getLogger(MultithreadedTableMapper.class);
   private Class<? extends Mapper<ImmutableBytesWritable, Result,K2,V2>> mapClass;
@@ -281,7 +282,8 @@ public class MultithreadedTableMapper<K2, V2> extends TableMapper<K2, V2> {
             outer.getInputSplit());
           Class<?> wrappedMapperClass = Class.forName("org.apache.hadoop.mapreduce.lib.map.WrappedMapper");
           Method getMapContext = wrappedMapperClass.getMethod("getMapContext", MapContext.class);
-          subcontext = (Context) getMapContext.invoke(wrappedMapperClass.newInstance(), mc);
+          subcontext = (Context) getMapContext.invoke(
+              wrappedMapperClass.getDeclaredConstructor().newInstance(), mc);
         } catch (Exception ee) { // FindBugs: REC_CATCH_EXCEPTION
           // rethrow as IOE
           throw new IOException(e);

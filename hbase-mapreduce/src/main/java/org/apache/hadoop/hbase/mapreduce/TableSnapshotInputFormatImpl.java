@@ -22,6 +22,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -300,17 +301,11 @@ public class TableSnapshotInputFormatImpl {
     if (splitAlgoClassName == null)
       return null;
     try {
-      return ((Class<? extends RegionSplitter.SplitAlgorithm>)
-              Class.forName(splitAlgoClassName)).newInstance();
-    } catch (ClassNotFoundException e) {
-      throw new IOException("SplitAlgo class " + splitAlgoClassName +
-              " is not found", e);
-    } catch (InstantiationException e) {
-      throw new IOException("SplitAlgo class " + splitAlgoClassName +
-              " is not instantiable", e);
-    } catch (IllegalAccessException e) {
-      throw new IOException("SplitAlgo class " + splitAlgoClassName +
-              " is not instantiable", e);
+      return Class.forName(splitAlgoClassName).asSubclass(RegionSplitter.SplitAlgorithm.class)
+          .getDeclaredConstructor().newInstance();
+    } catch (ClassNotFoundException | InstantiationException | IllegalAccessException |
+        NoSuchMethodException | InvocationTargetException e) {
+      throw new IOException("SplitAlgo class " + splitAlgoClassName + " is not found", e);
     }
   }
 
@@ -386,8 +381,19 @@ public class TableSnapshotInputFormatImpl {
                 calculateLocationsForInputSplit(conf, htd, hri, tableDir, localityEnabled);
 
             Scan boundedScan = new Scan(scan);
-            boundedScan.setStartRow(sp[i]);
-            boundedScan.setStopRow(sp[i + 1]);
+            if (scan.getStartRow().length == 0) {
+              boundedScan.withStartRow(sp[i]);
+            } else {
+              boundedScan.withStartRow(
+                Bytes.compareTo(scan.getStartRow(), sp[i]) > 0 ? scan.getStartRow() : sp[i]);
+            }
+
+            if (scan.getStopRow().length == 0) {
+              boundedScan.withStopRow(sp[i + 1]);
+            } else {
+              boundedScan.withStopRow(
+                Bytes.compareTo(scan.getStopRow(), sp[i + 1]) < 0 ? scan.getStopRow() : sp[i + 1]);
+            }
 
             splits.add(new InputSplit(htd, hri, hosts, boundedScan, restoreDir));
           }
@@ -532,9 +538,7 @@ public class TableSnapshotInputFormatImpl {
 
     restoreDir = new Path(restoreDir, UUID.randomUUID().toString());
 
-    // TODO: restore from record readers to parallelize.
     RestoreSnapshotHelper.copySnapshotForScanner(conf, fs, rootDir, restoreDir, snapshotName);
-
     conf.set(RESTORE_DIR_KEY, restoreDir.toString());
   }
 }

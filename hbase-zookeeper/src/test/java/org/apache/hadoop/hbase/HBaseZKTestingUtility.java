@@ -19,7 +19,6 @@ package org.apache.hadoop.hbase;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.UUID;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -33,7 +32,6 @@ import org.apache.yetus.audience.InterfaceAudience;
  */
 @InterfaceAudience.Public
 public class HBaseZKTestingUtility extends HBaseCommonTestingUtility {
-
   private MiniZooKeeperCluster zkCluster;
 
   /**
@@ -56,8 +54,7 @@ public class HBaseZKTestingUtility extends HBaseCommonTestingUtility {
 
   /**
    * @return Where the cluster will write data on the local subsystem. Creates it if it does not
-   *         exist already. A subdir of {@link #getBaseTestDir()}
-   * @see #getTestFileSystem()
+   *         exist already. A subdir of {@code HBaseCommonTestingUtility#getBaseTestDir()}
    */
   Path getClusterTestDir() {
     if (clusterTestDir == null) {
@@ -76,7 +73,7 @@ public class HBaseZKTestingUtility extends HBaseCommonTestingUtility {
 
     // Using randomUUID ensures that multiple clusters can be launched by
     // a same test, if it stops & starts them
-    Path testDir = getDataTestDir("cluster_" + UUID.randomUUID().toString());
+    Path testDir = getDataTestDir("cluster_" + getRandomUUID().toString());
     clusterTestDir = new File(testDir.toString()).getAbsoluteFile();
     // Have it cleaned up on exit
     boolean b = deleteOnExit();
@@ -125,8 +122,7 @@ public class HBaseZKTestingUtility extends HBaseCommonTestingUtility {
 
     if (clientPortList != null) {
       // Ignore extra client ports
-      int clientPortListSize = (clientPortList.length <= zooKeeperServerNum) ? clientPortList.length
-          : zooKeeperServerNum;
+      int clientPortListSize = Math.min(clientPortList.length, zooKeeperServerNum);
       for (int i = 0; i < clientPortListSize; i++) {
         this.zkCluster.addClientPort(clientPortList[i]);
       }
@@ -182,9 +178,8 @@ public class HBaseZKTestingUtility extends HBaseCommonTestingUtility {
   /**
    * Gets a ZKWatcher.
    */
-  public static ZKWatcher getZooKeeperWatcher(HBaseZKTestingUtility testUtil)
-      throws ZooKeeperConnectionException, IOException {
-    ZKWatcher zkw = new ZKWatcher(testUtil.getConfiguration(), "unittest", new Abortable() {
+  public static ZKWatcher getZooKeeperWatcher(HBaseZKTestingUtility testUtil) throws IOException {
+    return new ZKWatcher(testUtil.getConfiguration(), "unittest", new Abortable() {
       boolean aborted = false;
 
       @Override
@@ -198,7 +193,6 @@ public class HBaseZKTestingUtility extends HBaseCommonTestingUtility {
         return aborted;
       }
     });
-    return zkw;
   }
 
   /**
@@ -209,7 +203,7 @@ public class HBaseZKTestingUtility extends HBaseCommonTestingUtility {
     boolean ret = super.cleanupTestDir();
     if (deleteDir(this.clusterTestDir)) {
       this.clusterTestDir = null;
-      return ret & true;
+      return ret;
     }
     return false;
   }

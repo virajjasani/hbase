@@ -40,7 +40,6 @@ import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestStateMachineProcedure {
-
   @ClassRule
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestStateMachineProcedure.class);
@@ -48,10 +47,19 @@ public class TestStateMachineProcedure {
   private static final Logger LOG = LoggerFactory.getLogger(TestStateMachineProcedure.class);
 
   private static final Exception TEST_FAILURE_EXCEPTION = new Exception("test failure") {
+
+    private static final long serialVersionUID = 2147942238987041310L;
+
     @Override
     public boolean equals(final Object other) {
-      if (this == other) return true;
-      if (!(other instanceof Exception)) return false;
+      if (this == other) {
+        return true;
+      }
+
+      if (!(other instanceof Exception)) {
+        return false;
+      }
+
       // we are going to serialize the exception in the test,
       // so the instance comparison will not match
       return getMessage().equals(((Exception)other).getMessage());
@@ -81,9 +89,9 @@ public class TestStateMachineProcedure {
 
     logDir = new Path(testDir, "proc-logs");
     procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), logDir);
-    procExecutor = new ProcedureExecutor(htu.getConfiguration(), new TestProcEnv(), procStore);
+    procExecutor = new ProcedureExecutor<>(htu.getConfiguration(), new TestProcEnv(), procStore);
     procStore.start(PROCEDURE_EXECUTOR_SLOTS);
-    procExecutor.start(PROCEDURE_EXECUTOR_SLOTS, true);
+    ProcedureTestingUtility.initAndStartWorkers(procExecutor, PROCEDURE_EXECUTOR_SLOTS, true);
   }
 
   @After
@@ -174,6 +182,11 @@ public class TestStateMachineProcedure {
     }
 
     @Override
+    protected boolean isRollbackSupported(TestSMProcedureState state) {
+      return true;
+    }
+
+    @Override
     protected void rollbackState(TestProcEnv env, TestSMProcedureState state) {
       LOG.info("ROLLBACK " + state + " " + this);
       env.rollbackCount.incrementAndGet();
@@ -197,7 +210,7 @@ public class TestStateMachineProcedure {
 
   public static class SimpleChildProcedure extends NoopProcedure<TestProcEnv> {
     @Override
-    protected Procedure[] execute(TestProcEnv env) {
+    protected Procedure<TestProcEnv>[] execute(TestProcEnv env) {
       LOG.info("EXEC " + this);
       env.execCount.incrementAndGet();
       if (env.triggerChildRollback) {

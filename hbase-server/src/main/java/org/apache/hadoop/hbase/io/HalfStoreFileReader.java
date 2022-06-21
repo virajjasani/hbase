@@ -30,7 +30,6 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeyValue;
@@ -61,9 +60,9 @@ public class HalfStoreFileReader extends StoreFileReader {
   // i.e. empty column and a timestamp of LATEST_TIMESTAMP.
   protected final byte [] splitkey;
 
-  protected final Cell splitCell;
+  private final Cell splitCell;
 
-  private Optional<Cell> firstKey = null;
+  private Optional<Cell> firstKey = Optional.empty();
 
   private boolean firstKeySeeked = false;
 
@@ -270,7 +269,8 @@ public class HalfStoreFileReader extends StoreFileReader {
       public boolean seekBefore(Cell key) throws IOException {
         if (top) {
           Optional<Cell> fk = getFirstKey();
-          if (PrivateCellUtil.compareKeyIgnoresMvcc(getComparator(), key, fk.get()) <= 0) {
+          if (fk.isPresent() &&
+                  PrivateCellUtil.compareKeyIgnoresMvcc(getComparator(), key, fk.get()) <= 0) {
             return false;
           }
         } else {

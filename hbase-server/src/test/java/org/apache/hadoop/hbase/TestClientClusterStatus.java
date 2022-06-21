@@ -66,7 +66,9 @@ public class TestClientClusterStatus {
     Configuration conf = HBaseConfiguration.create();
     conf.set(CoprocessorHost.MASTER_COPROCESSOR_CONF_KEY, MyObserver.class.getName());
     UTIL = new HBaseTestingUtility(conf);
-    UTIL.startMiniCluster(MASTERS, SLAVES);
+    StartMiniClusterOption option = StartMiniClusterOption.builder()
+        .numMasters(MASTERS).numRegionServers(SLAVES).numDataNodes(SLAVES).build();
+    UTIL.startMiniCluster(option);
     CLUSTER = UTIL.getHBaseCluster();
     CLUSTER.waitForActiveAndReadyMaster();
     ADMIN = UTIL.getAdmin();
@@ -96,17 +98,19 @@ public class TestClientClusterStatus {
     Assert.assertTrue(origin.getServersSize() == defaults.getServersSize());
     Assert.assertTrue(origin.getMasterInfoPort() == defaults.getMasterInfoPort());
     Assert.assertTrue(origin.equals(defaults));
+    Assert.assertTrue(origin.getServersName().size() == defaults.getServersName().size());
   }
 
   @Test
   public void testNone() throws Exception {
-    ClusterStatus status0
-      = new ClusterStatus(ADMIN.getClusterMetrics(EnumSet.allOf(Option.class)));
-    ClusterStatus status1
-      = new ClusterStatus(ADMIN.getClusterMetrics(EnumSet.noneOf(Option.class)));
-    Assert.assertEquals(status0, status1);
-    checkPbObjectNotNull(status0);
-    checkPbObjectNotNull(status1);
+    ClusterMetrics status0 = ADMIN.getClusterMetrics(EnumSet.allOf(Option.class));
+    ClusterMetrics status1 = ADMIN.getClusterMetrics(EnumSet.noneOf(Option.class));
+    // Do a rough compare. More specific compares can fail because all regions not deployed yet
+    // or more requests than expected.
+    Assert.assertEquals(status0.getLiveServerMetrics().size(),
+        status1.getLiveServerMetrics().size());
+    checkPbObjectNotNull(new ClusterStatus(status0));
+    checkPbObjectNotNull(new ClusterStatus(status1));
   }
 
   @Test
@@ -132,7 +136,8 @@ public class TestClientClusterStatus {
       }
     });
     // Retrieve live servers and dead servers info.
-    EnumSet<Option> options = EnumSet.of(Option.LIVE_SERVERS, Option.DEAD_SERVERS);
+    EnumSet<Option> options =
+        EnumSet.of(Option.LIVE_SERVERS, Option.DEAD_SERVERS, Option.SERVERS_NAME);
     ClusterStatus status = new ClusterStatus(ADMIN.getClusterMetrics(options));
     checkPbObjectNotNull(status);
     Assert.assertNotNull(status);
@@ -148,6 +153,8 @@ public class TestClientClusterStatus {
     Assert.assertEquals(1, status.getDeadServersSize());
     ServerName deadServerName = status.getDeadServerNames().iterator().next();
     Assert.assertEquals(DEAD.getServerName(), deadServerName);
+    Assert.assertNotNull(status.getServersName());
+    Assert.assertEquals(numRs, status.getServersName().size());
   }
 
   @Test

@@ -53,12 +53,12 @@ import org.slf4j.LoggerFactory;
 
 /**
  *
- * Integration test that verifies Procedure V2. <br/><br/>
+ * Integration test that verifies Procedure V2.
  *
  * DDL operations should go through (rollforward or rollback) when primary master is killed by
- * ChaosMonkey (default MASTER_KILLING)<br/><br/>
+ * ChaosMonkey (default MASTER_KILLING).
  *
- * Multiple Worker threads are started to randomly do the following Actions in loops:<br/>
+ * <p></p>Multiple Worker threads are started to randomly do the following Actions in loops:
  * Actions generating and populating tables:
  * <ul>
  *     <li>CreateTableAction</li>
@@ -440,7 +440,7 @@ public class IntegrationTestDDLMasterFailover extends IntegrationTestBase {
       String tableName = String.format("ittable-%010d", RandomUtils.nextInt());
       String familyName = "cf-" + Math.abs(RandomUtils.nextInt());
       return TableDescriptorBuilder.newBuilder(TableName.valueOf(tableName))
-          .addColumnFamily(ColumnFamilyDescriptorBuilder.of(familyName))
+          .setColumnFamily(ColumnFamilyDescriptorBuilder.of(familyName))
           .build();
     }
   }

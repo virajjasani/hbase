@@ -167,28 +167,26 @@ public class FavoredNodeAssignmentHelper {
   }
 
   /**
-   * Generates and returns a Put containing the region info for the catalog table
-   * and the servers
-   * @param regionInfo
-   * @param favoredNodeList
+   * Generates and returns a Put containing the region info for the catalog table and the servers
    * @return Put object
    */
-  static Put makePutFromRegionInfo(RegionInfo regionInfo, List<ServerName>favoredNodeList)
-  throws IOException {
+  private static Put makePutFromRegionInfo(RegionInfo regionInfo, List<ServerName> favoredNodeList)
+      throws IOException {
     Put put = null;
     if (favoredNodeList != null) {
-      put = MetaTableAccessor.makePutFromRegionInfo(regionInfo);
+      long time = EnvironmentEdgeManager.currentTime();
+      put = MetaTableAccessor.makePutFromRegionInfo(regionInfo, time);
       byte[] favoredNodes = getFavoredNodes(favoredNodeList);
       put.add(CellBuilderFactory.create(CellBuilderType.SHALLOW_COPY)
           .setRow(put.getRow())
           .setFamily(HConstants.CATALOG_FAMILY)
           .setQualifier(FAVOREDNODES_QUALIFIER)
-          .setTimestamp(EnvironmentEdgeManager.currentTime())
+          .setTimestamp(time)
           .setType(Type.Put)
           .setValue(favoredNodes)
           .build());
-      LOG.debug("Create the region " + regionInfo.getRegionNameAsString() +
-                 " with favored nodes " + favoredNodeList);
+      LOG.debug("Create the region {} with favored nodes {}", regionInfo.getRegionNameAsString(),
+        favoredNodeList);
     }
     return put;
   }
@@ -397,8 +395,7 @@ public class FavoredNodeAssignmentHelper {
     rackSkipSet.add(primaryRack);
     String secondaryRack = getOneRandomRack(rackSkipSet);
     List<ServerName> serverList = getServersFromRack(secondaryRack);
-    Set<ServerName> serverSet = new HashSet<>();
-    serverSet.addAll(serverList);
+    Set<ServerName> serverSet = new HashSet<>(serverList);
     ServerName[] favoredNodes;
     if (serverList.size() >= 2) {
       // Randomly pick up two servers from this secondary rack
@@ -435,8 +432,7 @@ public class FavoredNodeAssignmentHelper {
         }
         secondaryRack = getOneRandomRack(rackSkipSet);
         serverList = getServersFromRack(secondaryRack);
-        serverSet = new HashSet<>();
-        serverSet.addAll(serverList);
+        serverSet = new HashSet<>(serverList);
       }
 
       // Place the secondary RS

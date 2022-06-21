@@ -47,9 +47,11 @@ import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesti
  * implementations:
  * <ul>
  *   <li><em>defaultProvider</em> : whatever provider is standard for the hbase version. Currently
- *                                  "filesystem"</li>
+ *                                  "asyncfs"</li>
+ *   <li><em>asyncfs</em> : a provider that will run on top of an implementation of the Hadoop
+ *                             FileSystem interface via an asynchronous client.</li>
  *   <li><em>filesystem</em> : a provider that will run on top of an implementation of the Hadoop
- *                             FileSystem interface, normally HDFS.</li>
+ *                             FileSystem interface via HDFS's synchronous DFSClient.</li>
  *   <li><em>multiwal</em> : a provider that will use multiple "filesystem" wal instances per region
  *                           server.</li>
  * </ul>
@@ -80,7 +82,6 @@ public class WALFactory {
   static final String DEFAULT_WAL_PROVIDER = Providers.defaultProvider.name();
 
   public static final String META_WAL_PROVIDER = "hbase.wal.meta_provider";
-  static final String DEFAULT_META_WAL_PROVIDER = Providers.defaultProvider.name();
 
   final String factoryId;
   private final WALProvider provider;
@@ -119,9 +120,31 @@ public class WALFactory {
   }
 
   @VisibleForTesting
+  Providers getDefaultProvider() {
+    return Providers.defaultProvider;
+  }
+
+  @VisibleForTesting
   public Class<? extends WALProvider> getProviderClass(String key, String defaultValue) {
     try {
-      return Providers.valueOf(conf.get(key, defaultValue)).clazz;
+      Providers provider = Providers.valueOf(conf.get(key, defaultValue));
+
+      // AsyncFSWALProvider is not guaranteed to work on all Hadoop versions, when it's chosen as
+      // the default and we can't use it, we want to fall back to FSHLog which we know works on
+      // all versions.
+      if (provider == getDefaultProvider() && provider.clazz == AsyncFSWALProvider.class
+          && !AsyncFSWALProvider.load()) {
+        // AsyncFSWAL has better performance in most cases, and also uses less resources, we will
+        // try to use it if possible. It deeply hacks into the internal of DFSClient so will be
+        // easily broken when upgrading hadoop.
+        LOG.warn("Failed to load AsyncFSWALProvider, falling back to FSHLogProvider");
+        return FSHLogProvider.class;
+      }
+
+      // N.b. If the user specifically requested AsyncFSWALProvider but their environment doesn't
+      // support using it (e.g. AsyncFSWALProvider.load() == false), we should let this fail and
+      // not fall back to FSHLogProvider.
+      return provider.clazz;
     } catch (IllegalArgumentException exception) {
       // Fall back to them specifying a class name
       // Note that the passed default class shouldn't actually be used, since the above only fails
@@ -223,14 +246,25 @@ public class WALFactory {
     return provider.getWALs();
   }
 
-  private WALProvider getMetaProvider() throws IOException {
+  @VisibleForTesting
+  WALProvider getMetaProvider() throws IOException {
     for (;;) {
       WALProvider provider = this.metaProvider.get();
       if (provider != null) {
         return provider;
       }
-      provider = getProvider(META_WAL_PROVIDER, DEFAULT_META_WAL_PROVIDER,
-        AbstractFSWALProvider.META_WAL_PROVIDER_ID);
+      Class<? extends WALProvider> clz = null;
+      if (conf.get(META_WAL_PROVIDER) == null) {
+        try {
+          clz = conf.getClass(WAL_PROVIDER, Providers.defaultProvider.clazz, WALProvider.class);
+        } catch (Throwable t) {
+          // the WAL provider should be an enum. Proceed
+        }
+      }
+      if (clz == null){
+        clz = getProviderClass(META_WAL_PROVIDER, conf.get(WAL_PROVIDER, DEFAULT_WAL_PROVIDER));
+      }
+      provider = createProvider(clz, AbstractFSWALProvider.META_WAL_PROVIDER_ID);
       if (metaProvider.compareAndSet(null, provider)) {
         return provider;
       } else {
@@ -335,18 +369,19 @@ public class WALFactory {
 
   /**
    * Create a writer for the WAL.
+   * Uses defaults.
    * <p>
-   * should be package-private. public only for tests and
+   * Should be package-private. public only for tests and
    * {@link org.apache.hadoop.hbase.regionserver.wal.Compressor}
    * @return A WAL writer. Close when done with it.
-   * @throws IOException
    */
   public Writer createWALWriter(final FileSystem fs, final Path path) throws IOException {
     return FSHLogProvider.createWriter(conf, fs, path, false);
   }
 
   /**
-   * should be package-private, visible for recovery testing.
+   * Should be package-private, visible for recovery testing.
+   * Uses defaults.
    * @return an overwritable writer for recovered edits. caller should close.
    */
   @VisibleForTesting
@@ -362,7 +397,7 @@ public class WALFactory {
   private static final AtomicReference<WALFactory> singleton = new AtomicReference<>();
   private static final String SINGLETON_ID = WALFactory.class.getName();
   
-  // public only for FSHLog
+  // Public only for FSHLog
   public static WALFactory getInstance(Configuration configuration) {
     WALFactory factory = singleton.get();
     if (null == factory) {
@@ -415,6 +450,7 @@ public class WALFactory {
 
   /**
    * If you already have a WALFactory, you should favor the instance method.
+   * Uses defaults.
    * @return a Writer that will overwrite files. Caller must close.
    */
   static Writer createRecoveredEditsWriter(final FileSystem fs, final Path path,
@@ -425,6 +461,7 @@ public class WALFactory {
 
   /**
    * If you already have a WALFactory, you should favor the instance method.
+   * Uses defaults.
    * @return a writer that won't overwrite files. Caller must close.
    */
   @VisibleForTesting
@@ -432,6 +469,11 @@ public class WALFactory {
       final Configuration configuration)
       throws IOException {
     return FSHLogProvider.createWriter(configuration, fs, path, false);
+  }
+
+  @VisibleForTesting
+  public String getFactoryId() {
+    return factoryId;
   }
 
   public final WALProvider getWALProvider() {

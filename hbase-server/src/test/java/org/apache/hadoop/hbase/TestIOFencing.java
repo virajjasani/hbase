@@ -41,7 +41,6 @@ import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.HStoreFile;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
-import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.regionserver.wal.WALUtil;
@@ -194,17 +193,19 @@ public class TestIOFencing {
         TableDescriptor htd, RegionServerServices rsServices) {
       super(tableDir, log, fs, confParam, info, htd, rsServices);
     }
+
     @Override
-    protected HStore instantiateHStore(final ColumnFamilyDescriptor family) throws IOException {
-      return new BlockCompactionsInCompletionHStore(this, family, this.conf);
+    protected HStore instantiateHStore(final ColumnFamilyDescriptor family, boolean warmup)
+        throws IOException {
+      return new BlockCompactionsInCompletionHStore(this, family, this.conf, warmup);
     }
   }
 
   public static class BlockCompactionsInCompletionHStore extends HStore {
     CompactionBlockerRegion r;
     protected BlockCompactionsInCompletionHStore(HRegion region, ColumnFamilyDescriptor family,
-        Configuration confParam) throws IOException {
-      super(region, family, confParam);
+        Configuration confParam, boolean warmup) throws IOException {
+      super(region, family, confParam, warmup);
       r = (CompactionBlockerRegion) region;
     }
 

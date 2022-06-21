@@ -31,7 +31,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import org.apache.hadoop.hbase.filter.ByteArrayComparable;
-import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.io.TagCompressionContext;
 import org.apache.hadoop.hbase.io.util.Dictionary;
 import org.apache.hadoop.hbase.io.util.StreamUtils;
@@ -250,7 +249,7 @@ public final class PrivateCellUtil {
 
     @Override
     public long heapSize() {
-      long sum = HEAP_SIZE_OVERHEAD + estimatedHeapSizeOf(cell);
+      long sum = HEAP_SIZE_OVERHEAD + cell.heapSize();
       if (this.tags != null) {
         sum += ClassSize.sizeOf(this.tags);
       }
@@ -446,7 +445,7 @@ public final class PrivateCellUtil {
 
     @Override
     public long heapSize() {
-      long sum = HEAP_SIZE_OVERHEAD + estimatedHeapSizeOf(cell);
+      long sum = HEAP_SIZE_OVERHEAD + cell.heapSize();
       // this.tags is on heap byte[]
       if (this.tags != null) {
         sum += ClassSize.sizeOf(this.tags);
@@ -705,7 +704,7 @@ public final class PrivateCellUtil {
 
     @Override
     public ExtendedCell deepClone() {
-      Cell clonedBaseCell = ((ExtendedCell) this.cell).deepClone();
+      Cell clonedBaseCell = this.cell.deepClone();
       if (clonedBaseCell instanceof ByteBufferExtendedCell) {
         return new ValueAndTagRewriteByteBufferExtendedCell(
             (ByteBufferExtendedCell) clonedBaseCell, this.value, this.tags);
@@ -756,6 +755,28 @@ public final class PrivateCellUtil {
     }
     return Bytes.equals(left.getQualifierArray(), left.getQualifierOffset(),
       left.getQualifierLength(), buf, offset, length);
+  }
+
+  /**
+   * Finds if the start of the qualifier part of the Cell matches <code>buf</code>
+   * @param left the cell with which we need to match the qualifier
+   * @param startsWith the serialized keyvalue format byte[]
+   * @return true if the qualifier have same staring characters, false otherwise
+   */
+  public static boolean qualifierStartsWith(final Cell left, final byte[] startsWith) {
+    if (startsWith == null || startsWith.length == 0) {
+      throw new IllegalArgumentException("Cannot pass an empty startsWith");
+    }
+    if (left.getQualifierLength() < startsWith.length) {
+      return false;
+    }
+    if (left instanceof ByteBufferExtendedCell) {
+      return ByteBufferUtils.equals(((ByteBufferExtendedCell) left).getQualifierByteBuffer(),
+          ((ByteBufferExtendedCell) left).getQualifierPosition(), startsWith.length,
+          startsWith, 0, startsWith.length);
+    }
+    return Bytes.equals(left.getQualifierArray(), left.getQualifierOffset(),
+        startsWith.length, startsWith, 0, startsWith.length);
   }
 
   public static boolean matchingColumn(final Cell left, final byte[] fam, final int foffset,
@@ -1211,8 +1232,8 @@ public final class PrivateCellUtil {
 
   /**
    * Compare cell's row against given comparator
-   * @param cell
-   * @param comparator
+   * @param cell the cell to use for comparison
+   * @param comparator the {@link CellComparator} to use for comparison
    * @return result comparing cell's row
    */
   public static int compareRow(Cell cell, ByteArrayComparable comparator) {
@@ -1225,8 +1246,8 @@ public final class PrivateCellUtil {
 
   /**
    * Compare cell's column family against given comparator
-   * @param cell
-   * @param comparator
+   * @param cell the cell to use for comparison
+   * @param comparator the {@link CellComparator} to use for comparison
    * @return result comparing cell's column family
    */
   public static int compareFamily(Cell cell, ByteArrayComparable comparator) {
@@ -1240,8 +1261,8 @@ public final class PrivateCellUtil {
 
   /**
    * Compare cell's qualifier against given comparator
-   * @param cell
-   * @param comparator
+   * @param cell the cell to use for comparison
+   * @param comparator the {@link CellComparator} to use for comparison
    * @return result comparing cell's qualifier
    */
   public static int compareQualifier(Cell cell, ByteArrayComparable comparator) {
@@ -1278,8 +1299,8 @@ public final class PrivateCellUtil {
 
   /**
    * Compare cell's value against given comparator
-   * @param cell
-   * @param comparator
+   * @param cell the cell to use for comparison
+   * @param comparator the {@link CellComparator} to use for comparison
    * @return result comparing cell's value
    */
   public static int compareValue(Cell cell, ByteArrayComparable comparator) {
@@ -1783,7 +1804,7 @@ public final class PrivateCellUtil {
         FirstOnRowCell.FIXED_HEAPSIZE
       + Bytes.SIZEOF_BYTE // flength
       + Bytes.SIZEOF_INT * 3 // foffset, qoffset, qlength
-      + (long)ClassSize.REFERENCE * 2; // fArray, qArray
+      + ClassSize.REFERENCE * 2; // fArray, qArray
     private final byte[] fArray;
     private final int foffset;
     private final byte flength;
@@ -1944,7 +1965,7 @@ public final class PrivateCellUtil {
   }
 
   private static class LastOnRowColCell extends LastOnRowCell {
-    private static final long FIXED_OVERHEAD = (long)LastOnRowCell.FIXED_OVERHEAD
+    private static final long FIXED_OVERHEAD = LastOnRowCell.FIXED_OVERHEAD
         + ClassSize.REFERENCE * 2 // fArray and qArray
         + Bytes.SIZEOF_INT * 3 // foffset, qoffset, qlength
         + Bytes.SIZEOF_BYTE; // flength
@@ -2579,7 +2600,7 @@ public final class PrivateCellUtil {
    * the index block, bloom keys from the bloom blocks This byte[] is expected to be serialized in
    * the KeyValue serialization format If the KeyValue (Cell's) serialization format changes this
    * method cannot be used.
-   * @param comparator the cell comparator
+   * @param comparator the {@link CellComparator} to use for comparison
    * @param left the cell to be compared
    * @param key the serialized key part of a KeyValue
    * @param offset the offset in the key byte[]
@@ -2606,8 +2627,14 @@ public final class PrivateCellUtil {
    * method is used both in the normal comparator and the "same-prefix" comparator. Note that we are
    * assuming that row portions of both KVs have already been parsed and found identical, and we
    * don't validate that assumption here.
-   * @param commonPrefix the length of the common prefix of the two key-values being compared,
-   *          including row length and row
+   * @param comparator the {@link CellComparator} to use for comparison
+   * @param left the cell to be compared
+   * @param right the serialized key part of a key-value
+   * @param roffset the offset in the key byte[]
+   * @param rlength the length of the key byte[]
+   * @param rowlength the row length
+   * @return greater than 0 if left cell is bigger, less than 0 if right cell is bigger, 0 if both
+   *         cells are equal
    */
   static final int compareWithoutRow(CellComparator comparator, Cell left, byte[] right,
       int roffset, int rlength, short rowlength) {
@@ -2737,34 +2764,7 @@ public final class PrivateCellUtil {
    *         actual cell length.
    */
   public static int estimatedSerializedSizeOf(final Cell cell) {
-    if (cell instanceof ExtendedCell) {
-      return ((ExtendedCell) cell).getSerializedSize(true) + Bytes.SIZEOF_INT;
-    }
-
-    return getSumOfCellElementLengths(cell) +
-    // Use the KeyValue's infrastructure size presuming that another implementation would have
-    // same basic cost.
-        KeyValue.ROW_LENGTH_SIZE + KeyValue.FAMILY_LENGTH_SIZE +
-        // Serialization is probably preceded by a length (it is in the KeyValueCodec at least).
-        Bytes.SIZEOF_INT;
-  }
-
-  /**
-   * @param cell
-   * @return Sum of the lengths of all the elements in a Cell; does not count in any infrastructure
-   */
-  private static int getSumOfCellElementLengths(final Cell cell) {
-    return getSumOfCellKeyElementLengths(cell) + cell.getValueLength() + cell.getTagsLength();
-  }
-
-  /**
-   * @param cell
-   * @return Sum of all elements that make up a key; does not include infrastructure, tags or
-   *         values.
-   */
-  private static int getSumOfCellKeyElementLengths(final Cell cell) {
-    return cell.getRowLength() + cell.getFamilyLength() + cell.getQualifierLength()
-        + KeyValue.TIMESTAMP_TYPE_SIZE;
+    return cell.getSerializedSize() + Bytes.SIZEOF_INT;
   }
 
   /**
@@ -2776,22 +2776,6 @@ public final class PrivateCellUtil {
     if (cell instanceof KeyValue) return ((KeyValue) cell).getKeyLength();
     return cell.getRowLength() + cell.getFamilyLength() + cell.getQualifierLength()
         + KeyValue.KEY_INFRASTRUCTURE_SIZE;
-  }
-
-  /**
-   * This is an estimate of the heap space occupied by a cell. When the cell is of type
-   * {@link HeapSize} we call {@link HeapSize#heapSize()} so cell can give a correct value. In other
-   * cases we just consider the bytes occupied by the cell components ie. row, CF, qualifier,
-   * timestamp, type, value and tags.
-   * @param cell
-   * @return estimate of the heap space
-   */
-  public static long estimatedHeapSizeOf(final Cell cell) {
-    if (cell instanceof HeapSize) {
-      return ((HeapSize) cell).heapSize();
-    }
-    // TODO: Add sizing of references that hold the row, family, etc., arrays.
-    return estimatedSerializedSizeOf(cell);
   }
 
   /**

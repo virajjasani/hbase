@@ -29,6 +29,7 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.MiniHBaseCluster.MiniHBaseClusterRegionServer;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.StartMiniClusterOption;
 import org.apache.hadoop.hbase.Waiter;
 import org.apache.hadoop.hbase.master.assignment.RegionStates;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
@@ -60,7 +61,9 @@ public class TestMetaShutdownHandler {
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
-    TEST_UTIL.startMiniCluster(1, 3, null, null, MyRegionServer.class);
+    StartMiniClusterOption option = StartMiniClusterOption.builder()
+        .numRegionServers(3).rsClass(MyRegionServer.class).numDataNodes(3).build();
+    TEST_UTIL.startMiniCluster(option);
   }
 
   @AfterClass
@@ -102,7 +105,8 @@ public class TestMetaShutdownHandler {
     // Delete the ephemeral node of the meta-carrying region server.
     // This is trigger the expire of this region server on the master.
     String rsEphemeralNodePath =
-        ZNodePaths.joinZNode(master.getZooKeeper().znodePaths.rsZNode, metaServerName.toString());
+        ZNodePaths.joinZNode(master.getZooKeeper().getZNodePaths().rsZNode,
+                metaServerName.toString());
     ZKUtil.deleteNode(master.getZooKeeper(), rsEphemeralNodePath);
     LOG.info("Deleted the znode for the RegionServer hosting hbase:meta; waiting on SSH");
     // Wait for SSH to finish

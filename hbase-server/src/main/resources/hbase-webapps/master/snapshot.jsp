@@ -36,7 +36,7 @@
   SnapshotInfo.SnapshotStats stats = null;
   TableName snapshotTable = null;
   boolean tableExists = false;
-  if(snapshotName != null) {
+  if(snapshotName != null && master.isInitialized()) {
     try (Admin admin = master.getConnection().getAdmin()) {
       for (SnapshotDescription snapshotDesc: admin.listSnapshots()) {
         if (snapshotName.equals(snapshotDesc.getName())) {
@@ -66,13 +66,20 @@
 </jsp:include>
 
 <div class="container-fluid content">
-<% if (snapshot == null) { %>
+<% if (!master.isInitialized()) { %>
+    <div class="row inner_header">
+    <div class="page-header">
+    <h1>Master is not initialized</h1>
+    </div>
+    </div>
+    <jsp:include page="redirect.jsp" />
+<% } else if (snapshot == null) { %>
   <div class="row inner_header">
     <div class="page-header">
       <h1>Snapshot "<%= snapshotName %>" does not exist</h1>
     </div>
   </div>
-  <p>Go <a href="javascript:history.back()">Back</a>, or wait for the redirect.
+  <jsp:include page="redirect.jsp" />
 <% } else { %>
   <div class="row">
       <div class="page-header">

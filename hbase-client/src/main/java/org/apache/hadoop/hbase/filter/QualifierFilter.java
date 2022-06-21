@@ -78,11 +78,8 @@ public class QualifierFilter extends CompareFilter {
 
   @Override
   public ReturnCode filterCell(final Cell c) {
-    int qualifierLength = c.getQualifierLength();
-    if (qualifierLength > 0) {
-      if (compareQualifier(getCompareOperator(), this.comparator, c)) {
-        return ReturnCode.SKIP;
-      }
+    if (compareQualifier(getCompareOperator(), this.comparator, c)) {
+      return ReturnCode.SKIP;
     }
     return ReturnCode.INCLUDE;
   }
@@ -142,5 +139,15 @@ public class QualifierFilter extends CompareFilter {
     if (!(o instanceof QualifierFilter)) return false;
 
     return super.areSerializedFieldsEqual(o);
+  }
+
+  @Override
+  public boolean equals(Object obj) {
+    return obj instanceof Filter && areSerializedFieldsEqual((Filter) obj);
+  }
+
+  @Override
+  public int hashCode() {
+    return super.hashCode();
   }
 }

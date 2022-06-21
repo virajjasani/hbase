@@ -24,6 +24,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.regionserver.wal.FSHLog;
 import org.apache.hadoop.hbase.regionserver.wal.ProtobufLogWriter;
+import org.apache.hadoop.hbase.regionserver.wal.WALUtil;
 import org.apache.hadoop.hbase.util.CommonFSUtils;
 import org.apache.hadoop.hbase.util.CommonFSUtils.StreamLacksCapabilityException;
 import org.apache.yetus.audience.InterfaceAudience;
@@ -47,22 +48,35 @@ public class FSHLogProvider extends AbstractFSWALProvider<FSHLog> {
      * @throws StreamLacksCapabilityException if the given FileSystem can't provide streams that
      *         meet the needs of the given Writer implementation.
      */
-    void init(FileSystem fs, Path path, Configuration c, boolean overwritable)
+    void init(FileSystem fs, Path path, Configuration c, boolean overwritable, long blocksize)
         throws IOException, CommonFSUtils.StreamLacksCapabilityException;
   }
 
   /**
-   * public because of FSHLog. Should be package-private
+   * Public because of FSHLog. Should be package-private
+   * @param overwritable if the created writer can overwrite. For recovered edits, it is true and
+   *          for WAL it is false. Thus we can distinguish WAL and recovered edits by this.
    */
   public static Writer createWriter(final Configuration conf, final FileSystem fs, final Path path,
       final boolean overwritable) throws IOException {
+    return createWriter(conf, fs, path, overwritable,
+      WALUtil.getWALBlockSize(conf, fs, path, overwritable));
+  }
+
+  /**
+   * Public because of FSHLog. Should be package-private
+   */
+  public static Writer createWriter(final Configuration conf, final FileSystem fs, final Path path,
+    final boolean overwritable, long blocksize) throws IOException {
     // Configuration already does caching for the Class lookup.
-    Class<? extends Writer> logWriterClass = conf.getClass("hbase.regionserver.hlog.writer.impl",
-      ProtobufLogWriter.class, Writer.class);
+    Class<? extends Writer> logWriterClass =
+        conf.getClass("hbase.regionserver.hlog.writer.impl", ProtobufLogWriter.class,
+            Writer.class);
     Writer writer = null;
     try {
       writer = logWriterClass.getDeclaredConstructor().newInstance();
-      writer.init(fs, path, conf, overwritable);
+      FileSystem rootFs = FileSystem.get(path.toUri(), conf);
+      writer.init(rootFs, path, conf, overwritable, blocksize);
       return writer;
     } catch (Exception e) { 
       if (e instanceof CommonFSUtils.StreamLacksCapabilityException) {

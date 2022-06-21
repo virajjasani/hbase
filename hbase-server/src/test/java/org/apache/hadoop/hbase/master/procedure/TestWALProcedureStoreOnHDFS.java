@@ -33,10 +33,10 @@ import org.apache.hadoop.hbase.procedure2.store.ProcedureStore;
 import org.apache.hadoop.hbase.procedure2.store.wal.WALProcedureStore;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
+import org.apache.hadoop.hbase.util.CommonFSUtils;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.junit.After;
 import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
@@ -83,16 +83,19 @@ public class TestWALProcedureStoreOnHDFS {
 
   // No @Before because some tests need to do additional config first
   private void setupDFS() throws Exception {
+    Configuration conf = UTIL.getConfiguration();
     MiniDFSCluster dfs = UTIL.startMiniDFSCluster(3);
+    CommonFSUtils.setWALRootDir(conf, new Path(conf.get("fs.defaultFS"), "/tmp/wal"));
 
     Path logDir = new Path(new Path(dfs.getFileSystem().getUri()), "/test-logs");
-    store = ProcedureTestingUtility.createWalStore(UTIL.getConfiguration(), logDir);
+    store = ProcedureTestingUtility.createWalStore(conf, logDir);
     store.registerListener(stopProcedureListener);
     store.start(8);
     store.recoverLease();
   }
 
-  @After
+  // No @After
+  @SuppressWarnings("JUnit4TearDownNotRun")
   public void tearDown() throws Exception {
     store.stop(false);
     UTIL.getDFSCluster().getFileSystem().delete(store.getWALDir(), true);

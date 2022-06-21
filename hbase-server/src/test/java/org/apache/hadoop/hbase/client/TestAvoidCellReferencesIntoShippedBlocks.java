@@ -103,8 +103,6 @@ public class TestAvoidCellReferencesIntoShippedBlocks {
     Configuration conf = TEST_UTIL.getConfiguration();
     conf.setStrings(CoprocessorHost.REGION_COPROCESSOR_CONF_KEY,
       MultiRowMutationEndpoint.class.getName());
-    conf.setBoolean("hbase.table.sanity.checks", true); // enable for below
-                                                        // tests
     conf.setInt("hbase.regionserver.handler.count", 20);
     conf.setInt("hbase.bucketcache.size", 400);
     conf.setStrings(HConstants.BUCKET_CACHE_IOENGINE_KEY, "offheap");
@@ -142,7 +140,7 @@ public class TestAvoidCellReferencesIntoShippedBlocks {
       CacheConfig cacheConf = store.getCacheConfig();
       cacheConf.setCacheDataOnWrite(true);
       cacheConf.setEvictOnClose(true);
-      final BlockCache cache = cacheConf.getBlockCache();
+      final BlockCache cache = cacheConf.getBlockCache().get();
       // insert data. 5 Rows are added
       Put put = new Put(ROW);
       put.addColumn(FAMILY, QUALIFIER, data);
@@ -306,7 +304,7 @@ public class TestAvoidCellReferencesIntoShippedBlocks {
       CacheConfig cacheConf = store.getCacheConfig();
       cacheConf.setCacheDataOnWrite(true);
       cacheConf.setEvictOnClose(true);
-      final BlockCache cache = cacheConf.getBlockCache();
+      final BlockCache cache = cacheConf.getBlockCache().get();
       // insert data. 5 Rows are added
       Put put = new Put(ROW);
       put.addColumn(FAMILY, QUALIFIER, data);
@@ -400,23 +398,27 @@ public class TestAvoidCellReferencesIntoShippedBlocks {
               scanner = table.getScanner(s1);
               int count = Iterables.size(scanner);
               assertEquals("Count the rows", 2, count);
-              iterator = cache.iterator();
-              List<BlockCacheKey> newCacheList = new ArrayList<>();
-              while (iterator.hasNext()) {
-                CachedBlock next = iterator.next();
-                BlockCacheKey cacheKey = new BlockCacheKey(next.getFilename(), next.getOffset());
-                newCacheList.add(cacheKey);
-              }
               int newBlockRefCount = 0;
-              for (BlockCacheKey key : cacheList) {
-                if (newCacheList.contains(key)) {
-                  newBlockRefCount++;
+              List<BlockCacheKey> newCacheList = new ArrayList<>();
+              while (true) {
+                newBlockRefCount = 0;
+                newCacheList.clear();
+                iterator = cache.iterator();
+                while (iterator.hasNext()) {
+                  CachedBlock next = iterator.next();
+                  BlockCacheKey cacheKey = new BlockCacheKey(next.getFilename(), next.getOffset());
+                  newCacheList.add(cacheKey);
+                }
+                for (BlockCacheKey key : cacheList) {
+                  if (newCacheList.contains(key)) {
+                    newBlockRefCount++;
+                  }
+                }
+                if (newBlockRefCount == 6) {
+                  break;
                 }
               }
-
-              assertEquals("old blocks should still be found ", 6, newBlockRefCount);
               latch.countDown();
-
             } catch (IOException e) {
             }
           }

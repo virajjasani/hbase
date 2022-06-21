@@ -32,7 +32,7 @@ module Hbase
     def setup
       setup_hbase
       # Create test table if it does not exist
-      @test_name = "hbase_shell_tests_table"
+      @test_name = "hbase_shell_admin_test_table"
       create_test_table(@test_name)
     end
 
@@ -59,7 +59,8 @@ module Hbase
     end
   end
 
-    # Simple administration methods tests
+  # Simple administration methods tests
+  # rubocop:disable Metrics/ClassLength
   class AdminMethodsTest < Test::Unit::TestCase
     include TestHelpers
 
@@ -97,10 +98,26 @@ module Hbase
       assert(list.count > 0)
     end
 
+    define_test 'list_deadservers should return exact count of dead servers' do
+      output = capture_stdout { command(:list_deadservers) }
+      assert(output.include?('0 row(s)'))
+    end
+
     #-------------------------------------------------------------------------------
 
     define_test "flush should work" do
       command(:flush, 'hbase:meta')
+      servers = admin.list_liveservers
+      servers.each do |s|
+        command(:flush, s.toString)
+      end
+    end
+
+    #-------------------------------------------------------------------------------
+
+    define_test 'alter_status should work' do
+      output = capture_stdout { command(:alter_status, @test_name) }
+      assert(output.include?('1/1 regions updated'))
     end
 
     #-------------------------------------------------------------------------------
@@ -189,7 +206,7 @@ module Hbase
       drop_test_table(@create_test_name)
       command(:create, @create_test_name, 'a', 'b')
       assert_equal(['a:', 'b:'], table(@create_test_name).get_all_columns.sort)
-     end
+    end
 
     define_test "create should work with hash column args" do
       drop_test_table(@create_test_name)
@@ -220,13 +237,17 @@ module Hbase
               FLUSH_POLICY => 'org.apache.hadoop.hbase.regionserver.FlushAllLargeStoresPolicy',
               REGION_MEMSTORE_REPLICATION => 'TRUE',
               SPLIT_POLICY => 'org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy',
-              COMPACTION_ENABLED => 'false')
+              COMPACTION_ENABLED => 'false',
+              SPLIT_ENABLED => 'false',
+              MERGE_ENABLED => 'false')
       assert_equal(['a:', 'b:'], table(@create_test_name).get_all_columns.sort)
       assert_match(/12345678/, admin.describe(@create_test_name))
       assert_match(/987654321/, admin.describe(@create_test_name))
       assert_match(/77/, admin.describe(@create_test_name))
-      assert_match(/COMPACTION_ENABLED/, admin.describe(@create_test_name))
-      assert_match(/REGION_MEMSTORE_REPLICATION/, admin.describe(@create_test_name))
+      assert_match(/'COMPACTION_ENABLED' => 'false'/, admin.describe(@create_test_name))
+      assert_match(/'SPLIT_ENABLED' => 'false'/, admin.describe(@create_test_name))
+      assert_match(/'MERGE_ENABLED' => 'false'/, admin.describe(@create_test_name))
+      assert_match(/'REGION_MEMSTORE_REPLICATION' => 'true'/, admin.describe(@create_test_name))
       assert_match(/org.apache.hadoop.hbase.regionserver.FlushAllLargeStoresPolicy/,
         admin.describe(@create_test_name))
       assert_match(/org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy/,
@@ -249,10 +270,15 @@ module Hbase
 
     define_test "create should work when attributes value 'false' is not enclosed in single quotation marks" do
       drop_test_table(@create_test_name)
-      command(:create, @create_test_name,{NAME => 'a', BLOCKCACHE => false}, {COMPACTION_ENABLED => false})
+      command(:create, @create_test_name, {NAME => 'a', BLOCKCACHE => false},
+              COMPACTION_ENABLED => false,
+              SPLIT_ENABLED => false,
+              MERGE_ENABLED => false)
       assert_equal(['a:'], table(@create_test_name).get_all_columns.sort)
-      assert_match(/BLOCKCACHE/, admin.describe(@create_test_name))
-      assert_match(/COMPACTION_ENABLED/, admin.describe(@create_test_name))
+      assert_match(/BLOCKCACHE => 'false'/, admin.describe(@create_test_name))
+      assert_match(/'COMPACTION_ENABLED' => 'false'/, admin.describe(@create_test_name))
+      assert_match(/'SPLIT_ENABLED' => 'false'/, admin.describe(@create_test_name))
+      assert_match(/'MERGE_ENABLED' => 'false'/, admin.describe(@create_test_name))
     end
 
     #-------------------------------------------------------------------------------
@@ -263,8 +289,72 @@ module Hbase
       end
     end
 
-    define_test "describe should return a description" do
-      assert_not_nil admin.describe(@test_name)
+    define_test 'describe should return a description and quotas' do
+      drop_test_table(@create_test_name)
+      command(:create, @create_test_name, 'cf1', 'cf2')
+      command(:set_quota,
+              TYPE => SPACE,
+              LIMIT => '1G',
+              POLICY => NO_INSERTS,
+              TABLE => @create_test_name)
+      output = capture_stdout { command(:describe, @create_test_name) }
+
+      assert(output.include?("Table #{@create_test_name} is ENABLED"))
+      assert(output.include?('COLUMN FAMILIES DESCRIPTION'))
+      assert(output.include?("NAME => 'cf1'"))
+      assert(output.include?("NAME => 'cf2'"))
+      assert(output.include?('2 row(s)'))
+
+      assert(output.include?('QUOTAS'))
+      assert(output.include?('LIMIT => 1G'))
+      assert(output.include?('VIOLATION_POLICY => NO_INSERTS'))
+      assert(output.include?('TYPE => SPACE'))
+      assert(output.include?('1 row(s)'))
+
+      command(:set_quota,
+              TYPE => SPACE,
+              LIMIT => NONE,
+              TABLE => @create_test_name)
+      output = capture_stdout { command(:describe, @create_test_name) }
+      assert(output.include?('0 row(s)'))
+    end
+
+    define_test 'describe_namespace should return a description and quotas' do
+      ns = @create_test_name
+      command(:create_namespace, ns)
+      command(:set_quota,
+              TYPE => SPACE,
+              LIMIT => '1G',
+              POLICY => NO_INSERTS,
+              NAMESPACE => ns)
+      output = capture_stdout { command(:describe_namespace, ns) }
+
+      assert(output.include?('DESCRIPTION'))
+      assert(output.include?("NAME => '#{ns}'"))
+
+      assert(output.include?('QUOTAS'))
+      assert(output.include?('LIMIT => 1G'))
+      assert(output.include?('VIOLATION_POLICY => NO_INSERTS'))
+      assert(output.include?('TYPE => SPACE'))
+      assert(output.include?('1 row(s)'))
+
+      command(:set_quota,
+              TYPE => SPACE,
+              LIMIT => NONE,
+              NAMESPACE => ns)
+      output = capture_stdout { command(:describe_namespace, ns) }
+      assert(output.include?('0 row(s)'))
+    end
+
+    define_test 'describe_namespace should return quota disabled' do
+      ns = 'ns'
+      quota_table = ::HBaseQuotasConstants::QUOTA_TABLE_NAME.to_s
+      drop_test_table(quota_table)
+      command(:create_namespace, ns)
+      output = capture_stdout { command(:describe_namespace, ns) }
+      # re-creating quota table otherwise other test case may fail
+      command(:create, quota_table, 'q', 'u')
+      assert(output.include?('Quota is disabled'))
     end
 
     #-------------------------------------------------------------------------------
@@ -315,6 +405,122 @@ module Hbase
       admin.truncate_preserve(@create_test_name, $TEST_CLUSTER.getConfiguration)
       assert_equal(splits, table(@create_test_name)._get_splits_internal())
     end
+
+    #-------------------------------------------------------------------------------
+
+    define_test 'enable and disable tables by regex' do
+      @t1 = 't1'
+      @t2 = 't11'
+      @regex = 't1.*'
+      command(:create, @t1, 'f')
+      command(:create, @t2, 'f')
+      admin.disable_all(@regex)
+      assert(command(:is_disabled, @t1))
+      assert(command(:is_disabled, @t2))
+      admin.enable_all(@regex)
+      assert(command(:is_enabled, @t1))
+      assert(command(:is_enabled, @t2))
+      admin.disable_all(@regex)
+      admin.drop_all(@regex)
+      assert(!command(:exists, @t1))
+      assert(!command(:exists, @t2))
+    end
+
+    #-------------------------------------------------------------------------------
+
+    define_test "list_regions should fail for disabled table" do
+      drop_test_table(@create_test_name)
+      admin.create(@create_test_name, 'a')
+      command(:disable, @create_test_name)
+      assert(:is_disabled, @create_test_name)
+      assert_raise(RuntimeError) do
+        command(:list_regions, @create_test_name)
+      end
+    end
+  end
+  # rubocop:enable Metrics/ClassLength
+
+  # Simple administration methods tests
+  class AdminCloneTableSchemaTest < Test::Unit::TestCase
+    include TestHelpers
+    def setup
+      setup_hbase
+      # Create table test table name
+      @source_table_name = 'hbase_shell_tests_source_table_name'
+      @destination_table_name = 'hbase_shell_tests_destination_table_name'
+    end
+
+    def teardown
+      shutdown
+    end
+
+    define_test "clone_table_schema should create a new table by cloning the
+                 existent table schema." do
+      drop_test_table(@source_table_name)
+      drop_test_table(@destination_table_name)
+      command(:create,
+              @source_table_name,
+              NAME => 'a',
+              CACHE_BLOOMS_ON_WRITE => 'TRUE',
+              CACHE_INDEX_ON_WRITE => 'TRUE',
+              EVICT_BLOCKS_ON_CLOSE => 'TRUE',
+              COMPRESSION_COMPACT => 'GZ')
+      command(:clone_table_schema,
+              @source_table_name,
+              @destination_table_name,
+              false)
+      assert_equal(['a:'],
+                   table(@source_table_name).get_all_columns.sort)
+      assert_match(/CACHE_BLOOMS_ON_WRITE/,
+                   admin.describe(@destination_table_name))
+      assert_match(/CACHE_INDEX_ON_WRITE/,
+                   admin.describe(@destination_table_name))
+      assert_match(/EVICT_BLOCKS_ON_CLOSE/,
+                   admin.describe(@destination_table_name))
+      assert_match(/GZ/,
+                   admin.describe(@destination_table_name))
+    end
+
+    define_test "clone_table_schema should maintain the source table's region
+                 boundaries when preserve_splits set to true" do
+      drop_test_table(@source_table_name)
+      drop_test_table(@destination_table_name)
+      command(:create,
+              @source_table_name,
+              'a',
+              NUMREGIONS => 10,
+              SPLITALGO => 'HexStringSplit')
+      splits = table(@source_table_name)._get_splits_internal
+      command(:clone_table_schema,
+              @source_table_name,
+              @destination_table_name,
+              true)
+      assert_equal(splits, table(@destination_table_name)._get_splits_internal)
+    end
+
+    define_test "clone_table_schema should have failed when source table
+                 doesn't exist." do
+      drop_test_table(@source_table_name)
+      drop_test_table(@destination_table_name)
+      assert_raise(RuntimeError) do
+        command(:clone_table_schema,
+                @source_table_name,
+                @destination_table_name)
+      end
+    end
+
+    define_test "clone_table_schema should have failed when destination
+                 table exists." do
+      drop_test_table(@source_table_name)
+      drop_test_table(@destination_table_name)
+      command(:create, @source_table_name, 'a')
+      command(:create, @destination_table_name, 'a')
+      assert_raise(RuntimeError) do
+        command(:clone_table_schema,
+                @source_table_name,
+                @destination_table_name)
+      end
+    end
   end
 
   # Simple administration methods tests
@@ -343,9 +549,14 @@ module Hbase
       encodedRegionName = region.getRegionInfo().getEncodedName()
       command(:unassign, encodedRegionName, true)
     end
+
+    define_test "list regions should allow table name" do
+      command(:list_regions, @test_name)
+    end
   end
 
- # Simple administration methods tests
+  # Simple administration methods tests
+  # rubocop:disable Metrics/ClassLength
   class AdminAlterTableTest < Test::Unit::TestCase
     include TestHelpers
 
@@ -401,18 +612,27 @@ module Hbase
       assert_equal(['x:', 'y:', 'z:'], table(@test_name).get_all_columns.sort)
     end
 
-    define_test "alter should support more than one alteration in one call" do
+    define_test 'alter should support more than one alteration in one call' do
       assert_equal(['x:', 'y:'], table(@test_name).get_all_columns.sort)
-      alterOutput = capture_stdout {
-        command(:alter, @test_name, { NAME => 'z' }, { METHOD => 'delete', NAME => 'y' },
-                'MAX_FILESIZE' => 12345678) }
+      alter_out_put = capture_stdout do
+        command(:alter, @test_name, { NAME => 'z' },
+                { METHOD => 'delete', NAME => 'y' },
+                'MAX_FILESIZE' => 12_345_678)
+      end
       command(:enable, @test_name)
-      assert_equal(1, /Updating all regions/.match(alterOutput).size,
-        "HBASE-15641 - Should only perform one table modification per alter.")
+      assert_equal(1, /Updating all regions/.match(alter_out_put).size,
+                   "HBASE-15641 - Should only perform one table
+                   modification per alter.")
       assert_equal(['x:', 'z:'], table(@test_name).get_all_columns.sort)
       assert_match(/12345678/, admin.describe(@test_name))
     end
 
+    define_test 'alter should be able to set the TargetRegionSize and TargetRegionCount' do
+      command(:alter, @test_name, 'NORMALIZER_TARGET_REGION_COUNT' => 156)
+      assert_match(/156/, admin.describe(@test_name))
+      command(:alter, @test_name, 'NORMALIZER_TARGET_REGION_SIZE' => 234)
+      assert_match(/234/, admin.describe(@test_name))
+    end
 
     define_test 'alter should support shortcut DELETE alter specs' do
       assert_equal(['x:', 'y:'], table(@test_name).get_all_columns.sort)
@@ -516,256 +736,5 @@ module Hbase
       table.close
     end
   end
-
-  # Tests for the `status` shell command
-  class StatusTest < Test::Unit::TestCase
-    include TestHelpers
-
-    def setup
-      setup_hbase
-      # Create test table if it does not exist
-      @test_name = 'hbase_shell_tests_table'
-      drop_test_table(@test_name)
-      create_test_table(@test_name)
-    end
-
-    def teardown
-      shutdown
-    end
-
-    define_test 'Get replication status' do
-      output = capture_stdout { replication_status('replication', 'both') }
-      puts "Status output:\n#{output}"
-      assert output.include? 'SOURCE'
-      assert output.include? 'SINK'
-    end
-
-    define_test 'Get replication source metrics information' do
-      output = capture_stdout { replication_status('replication', 'source') }
-      puts "Status output:\n#{output}"
-      assert output.include? 'SOURCE'
-    end
-
-    define_test 'Get replication sink metrics information' do
-      output = capture_stdout { replication_status('replication', 'sink') }
-      puts "Status output:\n#{output}"
-      assert output.include? 'SINK'
-    end
-
-    define_test 'Get simple status' do
-      output = capture_stdout { admin.status('simple', '') }
-      puts "Status output:\n#{output}"
-      assert output.include? 'active master'
-    end
-
-    define_test 'Get detailed status' do
-      output = capture_stdout { admin.status('detailed', '') }
-      puts "Status output:\n#{output}"
-      # Some text which isn't in the simple output
-      assert output.include? 'regionsInTransition'
-    end
-  end
-
-# Simple administration methods tests
-  class AdminSnapshotTest < Test::Unit::TestCase
-    include TestHelpers
-
-    def setup
-      setup_hbase
-      # Create test table if it does not exist
-      @test_name = "hbase_shell_tests_table"
-      drop_test_table(@test_name)
-      create_test_table(@test_name)
-	  #Test snapshot name
-      @create_test_snapshot = 'hbase_shell_tests_snapshot'
-    end
-
-    def teardown
-      shutdown
-    end
-
-    #-------------------------------------------------------------------------------
-    define_test "Snapshot should fail with non-string table name" do
-      assert_raise(ArgumentError) do
-        command(:snapshot, 123, 'xxx')
-      end
-    end
-
-    define_test "Snapshot should fail with non-string snapshot name" do
-      assert_raise(ArgumentError) do
-        command(:snapshot, @test_name, 123)
-      end
-    end
-
-    define_test "Snapshot should fail without snapshot name" do
-      assert_raise(ArgumentError) do
-        command(:snapshot, @test_name)
-      end
-    end
-
-    define_test "Snapshot should work with string args" do
-      drop_test_snapshot()
-      command(:snapshot, @test_name, @create_test_snapshot)
-      list = command(:list_snapshots, @create_test_snapshot)
-      assert_equal(1, list.size)
-    end
-
-    define_test "Snapshot should work when SKIP_FLUSH args" do
-      drop_test_snapshot()
-      command(:snapshot, @test_name, @create_test_snapshot, {SKIP_FLUSH => true})
-      list = command(:list_snapshots, @create_test_snapshot)
-      assert_equal(1, list.size)
-    end
-
-    define_test "List snapshot without any args" do
-      drop_test_snapshot()
-      command(:snapshot, @test_name, @create_test_snapshot)
-      list = command(:list_snapshots)
-      assert_equal(1, list.size)
-    end
-
-    define_test "List snapshot for a non-existing snapshot" do
-      list = command(:list_snapshots, "xyz")
-      assert_equal(0, list.size)
-    end
-
-    define_test "Restore snapshot without any args" do
-      assert_raise(ArgumentError) do
-        command(:restore_snapshot)
-      end
-    end
-
-    define_test "Restore snapshot should work" do
-      drop_test_snapshot()
-      restore_table = "test_restore_snapshot_table"
-      command(:create, restore_table, 'f1', 'f2')
-      assert_match(eval("/" + "f1" + "/"), admin.describe(restore_table))
-      assert_match(eval("/" + "f2" + "/"), admin.describe(restore_table))
-      command(:snapshot, restore_table, @create_test_snapshot)
-      command(:alter, restore_table, METHOD => 'delete', NAME => 'f1')
-      assert_no_match(eval("/" + "f1" + "/"), admin.describe(restore_table))
-      assert_match(eval("/" + "f2" + "/"), admin.describe(restore_table))
-      drop_test_table(restore_table)
-      command(:restore_snapshot, @create_test_snapshot)
-      assert_match(eval("/" + "f1" + "/"), admin.describe(restore_table))
-      assert_match(eval("/" + "f2" + "/"), admin.describe(restore_table))
-      drop_test_table(restore_table)
-    end
-
-    define_test "Clone snapshot without any args" do
-      assert_raise(ArgumentError) do
-        command(:restore_snapshot)
-      end
-    end
-
-    define_test "Clone snapshot without table name args" do
-      assert_raise(ArgumentError) do
-        command(:clone_snapshot, @create_test_snapshot)
-      end
-    end
-
-    define_test "Clone snapshot should work" do
-      drop_test_snapshot()
-      clone_table = "test_clone_snapshot_table"
-      assert_match(eval("/" + "x" + "/"), admin.describe(@test_name))
-      assert_match(eval("/" + "y" + "/"), admin.describe(@test_name))
-      command(:snapshot, @test_name, @create_test_snapshot)
-      command(:clone_snapshot, @create_test_snapshot, clone_table)
-      assert_match(eval("/" + "x" + "/"), admin.describe(clone_table))
-      assert_match(eval("/" + "y" + "/"), admin.describe(clone_table))
-      drop_test_table(clone_table)
-    end
-
-    define_test "Delete snapshot without any args" do
-      assert_raise(ArgumentError) do
-        admin.delete_snapshot()
-      end
-    end
-
-    define_test "Delete snapshot should work" do
-      drop_test_snapshot()
-      command(:snapshot, @test_name, @create_test_snapshot)
-      list = command(:list_snapshots)
-      assert_equal(1, list.size)
-      admin.delete_snapshot(@create_test_snapshot)
-      list = command(:list_snapshots)
-      assert_equal(0, list.size)
-    end
-
-    define_test "Delete all snapshots without any args" do
-      assert_raise(ArgumentError) do
-        admin.delete_all_snapshot()
-      end
-    end
-
-    define_test "Delete all snapshots should work" do
-      drop_test_snapshot()
-      command(:snapshot, @test_name, "delete_all_snapshot1")
-      command(:snapshot, @test_name, "delete_all_snapshot2")
-      command(:snapshot, @test_name, "snapshot_delete_all_1")
-      command(:snapshot, @test_name, "snapshot_delete_all_2")
-      list = command(:list_snapshots)
-      assert_equal(4, list.size)
-      admin.delete_all_snapshot("d.*")
-      list = command(:list_snapshots)
-      assert_equal(2, list.size)
-      admin.delete_all_snapshot(".*")
-      list = command(:list_snapshots)
-      assert_equal(0, list.size)
-    end
-
-    define_test "Delete table snapshots without any args" do
-      assert_raise(ArgumentError) do
-        admin.delete_table_snapshots()
-      end
-    end
-
-    define_test "Delete table snapshots should work" do
-      drop_test_snapshot()
-      command(:snapshot, @test_name, "delete_table_snapshot1")
-      command(:snapshot, @test_name, "delete_table_snapshot2")
-      command(:snapshot, @test_name, "snapshot_delete_table1")
-      new_table = "test_delete_table_snapshots_table"
-      command(:create, new_table, 'f1')
-      command(:snapshot, new_table, "delete_table_snapshot3")
-      list = command(:list_snapshots)
-      assert_equal(4, list.size)
-      admin.delete_table_snapshots(@test_name, "d.*")
-      list = command(:list_snapshots)
-      assert_equal(2, list.size)
-      admin.delete_table_snapshots(@test_name)
-      list = command(:list_snapshots)
-      assert_equal(1, list.size)
-      admin.delete_table_snapshots(".*", "d.*")
-      list = command(:list_snapshots)
-      assert_equal(0, list.size)
-      drop_test_table(new_table)
-    end
-
-    define_test "List table snapshots without any args" do
-      assert_raise(ArgumentError) do
-        command(:list_table_snapshots)
-      end
-    end
-
-    define_test "List table snapshots should work" do
-      drop_test_snapshot()
-      command(:snapshot, @test_name, "delete_table_snapshot1")
-      command(:snapshot, @test_name, "delete_table_snapshot2")
-      command(:snapshot, @test_name, "snapshot_delete_table1")
-      new_table = "test_list_table_snapshots_table"
-      command(:create, new_table, 'f1')
-      command(:snapshot, new_table, "delete_table_snapshot3")
-      list = command(:list_table_snapshots, ".*")
-      assert_equal(4, list.size)
-      list = command(:list_table_snapshots, @test_name, "d.*")
-      assert_equal(2, list.size)
-      list = command(:list_table_snapshots, @test_name)
-      assert_equal(3, list.size)
-      admin.delete_table_snapshots(".*")
-      list = command(:list_table_snapshots, ".*", ".*")
-      assert_equal(0, list.size)
-      drop_test_table(new_table)
-    end
-  end
+  # rubocop:enable Metrics/ClassLength
 end

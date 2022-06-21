@@ -274,9 +274,9 @@ public final class SnapshotTestingUtils {
    * Helper method for testing async snapshot operations. Just waits for the
    * given snapshot to complete on the server by repeatedly checking the master.
    *
-   * @param master: the master running the snapshot
-   * @param snapshot: the snapshot to check
-   * @param sleep: amount to sleep between checks to see if the snapshot is done
+   * @param master the master running the snapshot
+   * @param snapshot the snapshot to check
+   * @param sleep amount to sleep between checks to see if the snapshot is done
    * @throws ServiceException if the snapshot fails
    * @throws org.apache.hbase.thirdparty.com.google.protobuf.ServiceException
    */
@@ -357,7 +357,7 @@ public final class SnapshotTestingUtils {
   /**
    * List all the HFiles in the given table
    *
-   * @param fs: FileSystem where the table lives
+   * @param fs FileSystem where the table lives
    * @param tableDir directory of the table
    * @return array of the current HFiles in the table (could be a zero-length array)
    * @throws IOException on unexecpted error reading the FS
@@ -507,7 +507,7 @@ public final class SnapshotTestingUtils {
         this.htd = htd;
         this.desc = desc;
         this.tableRegions = tableRegions;
-        this.snapshotDir = SnapshotDescriptionUtils.getWorkingSnapshotDir(desc, rootDir);
+        this.snapshotDir = SnapshotDescriptionUtils.getWorkingSnapshotDir(desc, rootDir, conf);
         new FSTableDescriptors(conf)
           .createTableDescriptorForTableDirectory(snapshotDir, htd, false);
       }
@@ -687,14 +687,14 @@ public final class SnapshotTestingUtils {
         .setVersion(version)
         .build();
 
-      Path workingDir = SnapshotDescriptionUtils.getWorkingSnapshotDir(desc, rootDir);
+      Path workingDir = SnapshotDescriptionUtils.getWorkingSnapshotDir(desc, rootDir, conf);
       SnapshotDescriptionUtils.writeSnapshotInfo(desc, workingDir, fs);
       return new SnapshotBuilder(conf, fs, rootDir, htd, desc, regions);
     }
 
     public TableDescriptor createHtd(final String tableName) {
       return TableDescriptorBuilder.newBuilder(TableName.valueOf(tableName))
-              .addColumnFamily(ColumnFamilyDescriptorBuilder.of(TEST_FAMILY))
+              .setColumnFamily(ColumnFamilyDescriptorBuilder.of(TEST_FAMILY))
               .build();
     }
 
@@ -772,7 +772,7 @@ public final class SnapshotTestingUtils {
           .newBuilder(tableName)
           .setRegionReplication(regionReplication);
     for (byte[] family : families) {
-      builder.addColumnFamily(ColumnFamilyDescriptorBuilder.of(family));
+      builder.setColumnFamily(ColumnFamilyDescriptorBuilder.of(family));
     }
     byte[][] splitKeys = getSplitKeys(nRegions);
     util.createTable(builder.build(), splitKeys);

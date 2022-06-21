@@ -66,10 +66,10 @@ public class TestChildProcedures {
     logDir = new Path(testDir, "proc-logs");
     procEnv = new TestProcEnv();
     procStore = ProcedureTestingUtility.createStore(htu.getConfiguration(), logDir);
-    procExecutor = new ProcedureExecutor(htu.getConfiguration(), procEnv, procStore);
+    procExecutor = new ProcedureExecutor<>(htu.getConfiguration(), procEnv, procStore);
     procExecutor.testing = new ProcedureExecutor.Testing();
     procStore.start(PROCEDURE_EXECUTOR_SLOTS);
-    procExecutor.start(PROCEDURE_EXECUTOR_SLOTS, true);
+    ProcedureTestingUtility.initAndStartWorkers(procExecutor, PROCEDURE_EXECUTOR_SLOTS, true);
   }
 
   @After
@@ -105,6 +105,29 @@ public class TestChildProcedures {
       restartCount++;
     }
     assertEquals(3, restartCount);
+    assertTrue("expected completed proc", procExecutor.isFinished(procId));
+    ProcedureTestingUtility.assertProcNotFailed(procExecutor, procId);
+  }
+
+
+  /**
+   * Test the state setting that happens after store to WAL; in particular the bit where we
+   * set the parent runnable again after its children have all completed successfully.
+   * See HBASE-20978.
+   */
+  @Test
+  public void testChildLoadWithRestartAfterChildSuccess() throws Exception {
+    procEnv.toggleKillAfterStoreUpdate = true;
+
+    TestRootProcedure proc = new TestRootProcedure();
+    long procId = ProcedureTestingUtility.submitAndWait(procExecutor, proc);
+    int restartCount = 0;
+    while (!procExecutor.isFinished(procId)) {
+      ProcedureTestingUtility.restart(procExecutor);
+      ProcedureTestingUtility.waitProcedure(procExecutor, proc);
+      restartCount++;
+    }
+    assertEquals(4, restartCount);
     assertTrue("expected completed proc", procExecutor.isFinished(procId));
     ProcedureTestingUtility.assertProcNotFailed(procExecutor, procId);
   }
@@ -154,6 +177,9 @@ public class TestChildProcedures {
       if (env.toggleKillBeforeStoreUpdate) {
         ProcedureTestingUtility.toggleKillBeforeStoreUpdate(procExecutor);
       }
+      if (env.toggleKillAfterStoreUpdate) {
+        ProcedureTestingUtility.toggleKillAfterStoreUpdate(procExecutor);
+      }
       return new Procedure[] { new TestChildProcedure(), new TestChildProcedure() };
     }
 
@@ -193,6 +219,7 @@ public class TestChildProcedures {
 
   private static class TestProcEnv {
     public boolean toggleKillBeforeStoreUpdate = false;
+    public boolean toggleKillAfterStoreUpdate = false;
     public boolean triggerRollbackOnChild = false;
   }
 }

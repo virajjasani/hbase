@@ -29,8 +29,9 @@ import java.util.List;
 import java.util.Map;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseIOException;
-import org.apache.hadoop.hbase.RegionLoad;
+import org.apache.hadoop.hbase.RegionMetrics;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.Size;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionInfoBuilder;
@@ -39,6 +40,7 @@ import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Rule;
@@ -349,6 +351,114 @@ public class TestSimpleRegionNormalizer {
     assertEquals(hri4, ((SplitNormalizationPlan) plan).getRegionInfo());
   }
 
+  @Test
+  public void testSplitWithTargetRegionCount() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    List<RegionInfo> RegionInfo = new ArrayList<>();
+    Map<byte[], Integer> regionSizes = new HashMap<>();
+
+    RegionInfo hri1 = RegionInfoBuilder.newBuilder(tableName).setStartKey(Bytes.toBytes("aaa"))
+        .setEndKey(Bytes.toBytes("bbb")).build();
+    RegionInfo.add(hri1);
+    regionSizes.put(hri1.getRegionName(), 20);
+
+    RegionInfo hri2 = RegionInfoBuilder.newBuilder(tableName).setStartKey(Bytes.toBytes("bbb"))
+        .setEndKey(Bytes.toBytes("ccc")).build();
+    RegionInfo.add(hri2);
+    regionSizes.put(hri2.getRegionName(), 40);
+
+    RegionInfo hri3 = RegionInfoBuilder.newBuilder(tableName).setStartKey(Bytes.toBytes("ccc"))
+        .setEndKey(Bytes.toBytes("ddd")).build();
+    RegionInfo.add(hri3);
+    regionSizes.put(hri3.getRegionName(), 60);
+
+    RegionInfo hri4 = RegionInfoBuilder.newBuilder(tableName).setStartKey(Bytes.toBytes("ddd"))
+        .setEndKey(Bytes.toBytes("eee")).build();
+    RegionInfo.add(hri4);
+    regionSizes.put(hri4.getRegionName(), 80);
+
+    RegionInfo hri5 = RegionInfoBuilder.newBuilder(tableName).setStartKey(Bytes.toBytes("eee"))
+        .setEndKey(Bytes.toBytes("fff")).build();
+    RegionInfo.add(hri5);
+    regionSizes.put(hri5.getRegionName(), 100);
+
+    RegionInfo hri6 = RegionInfoBuilder.newBuilder(tableName).setStartKey(Bytes.toBytes("fff"))
+        .setEndKey(Bytes.toBytes("ggg")).build();
+    RegionInfo.add(hri6);
+    regionSizes.put(hri6.getRegionName(), 120);
+
+    setupMocksForNormalizer(regionSizes, RegionInfo);
+
+    // test when target region size is 20
+    when(masterServices.getTableDescriptors().get(any()).getNormalizerTargetRegionSize())
+        .thenReturn(20L);
+    List<NormalizationPlan> plans = normalizer.computePlanForTable(tableName);
+    Assert.assertEquals(4, plans.size());
+
+    for (NormalizationPlan plan : plans) {
+      assertTrue(plan instanceof SplitNormalizationPlan);
+    }
+
+    // test when target region size is 200
+    when(masterServices.getTableDescriptors().get(any()).getNormalizerTargetRegionSize())
+        .thenReturn(200L);
+    plans = normalizer.computePlanForTable(tableName);
+    Assert.assertEquals(2, plans.size());
+    NormalizationPlan plan = plans.get(0);
+    assertTrue(plan instanceof MergeNormalizationPlan);
+    assertEquals(hri1, ((MergeNormalizationPlan) plan).getFirstRegion());
+    assertEquals(hri2, ((MergeNormalizationPlan) plan).getSecondRegion());
+  }
+
+  @Test
+  public void testSplitWithTargetRegionSize() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    List<RegionInfo> RegionInfo = new ArrayList<>();
+    Map<byte[], Integer> regionSizes = new HashMap<>();
+
+    RegionInfo hri1 = RegionInfoBuilder.newBuilder(tableName).setStartKey(Bytes.toBytes("aaa"))
+        .setEndKey(Bytes.toBytes("bbb")).build();
+    RegionInfo.add(hri1);
+    regionSizes.put(hri1.getRegionName(), 20);
+
+    RegionInfo hri2 = RegionInfoBuilder.newBuilder(tableName).setStartKey(Bytes.toBytes("bbb"))
+        .setEndKey(Bytes.toBytes("ccc")).build();
+    RegionInfo.add(hri2);
+    regionSizes.put(hri2.getRegionName(), 40);
+
+    RegionInfo hri3 = RegionInfoBuilder.newBuilder(tableName).setStartKey(Bytes.toBytes("ccc"))
+        .setEndKey(Bytes.toBytes("ddd")).build();
+    RegionInfo.add(hri3);
+    regionSizes.put(hri3.getRegionName(), 60);
+
+    RegionInfo hri4 = RegionInfoBuilder.newBuilder(tableName).setStartKey(Bytes.toBytes("ddd"))
+        .setEndKey(Bytes.toBytes("eee")).build();
+    RegionInfo.add(hri4);
+    regionSizes.put(hri4.getRegionName(), 80);
+
+    setupMocksForNormalizer(regionSizes, RegionInfo);
+
+    // test when target region count is 8
+    when(masterServices.getTableDescriptors().get(any()).getNormalizerTargetRegionCount())
+        .thenReturn(8);
+    List<NormalizationPlan> plans = normalizer.computePlanForTable(tableName);
+    Assert.assertEquals(2, plans.size());
+
+    for (NormalizationPlan plan : plans) {
+      assertTrue(plan instanceof SplitNormalizationPlan);
+    }
+
+    // test when target region count is 3
+    when(masterServices.getTableDescriptors().get(any()).getNormalizerTargetRegionCount())
+        .thenReturn(3);
+    plans = normalizer.computePlanForTable(tableName);
+    Assert.assertEquals(1, plans.size());
+    NormalizationPlan plan = plans.get(0);
+    assertTrue(plan instanceof MergeNormalizationPlan);
+    assertEquals(hri1, ((MergeNormalizationPlan) plan).getFirstRegion());
+    assertEquals(hri2, ((MergeNormalizationPlan) plan).getSecondRegion());
+  }
+
   @SuppressWarnings("MockitoCast")
   protected void setupMocksForNormalizer(Map<byte[], Integer> regionSizes,
                                          List<RegionInfo> RegionInfo) {
@@ -363,15 +473,16 @@ public class TestSimpleRegionNormalizer {
       getRegionServerOfRegion(any())).thenReturn(sn);
 
     for (Map.Entry<byte[], Integer> region : regionSizes.entrySet()) {
-      RegionLoad regionLoad = Mockito.mock(RegionLoad.class);
-      when(regionLoad.getName()).thenReturn(region.getKey());
-      when(regionLoad.getStorefileSizeMB()).thenReturn(region.getValue());
+      RegionMetrics regionLoad = Mockito.mock(RegionMetrics.class);
+      when(regionLoad.getRegionName()).thenReturn(region.getKey());
+      when(regionLoad.getStoreFileSize())
+        .thenReturn(new Size(region.getValue(), Size.Unit.MEGABYTE));
 
       // this is possibly broken with jdk9, unclear if false positive or not
       // suppress it for now, fix it when we get to running tests on 9
       // see: http://errorprone.info/bugpattern/MockitoCast
       when((Object) masterServices.getServerManager().getLoad(sn).
-        getRegionsLoad().get(region.getKey())).thenReturn(regionLoad);
+        getRegionMetrics().get(region.getKey())).thenReturn(regionLoad);
     }
     try {
       when(masterRpcServices.isSplitOrMergeEnabled(any(),

@@ -32,9 +32,8 @@ import org.apache.hadoop.hbase.HDFSBlocksDistribution;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.io.hfile.BlockCache;
-import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.CacheStats;
-import org.apache.hadoop.hbase.mob.MobCacheConfig;
+import org.apache.hadoop.hbase.io.hfile.CombinedBlockCache;
 import org.apache.hadoop.hbase.mob.MobFileCache;
 import org.apache.hadoop.hbase.regionserver.wal.MetricsWALSource;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
@@ -61,6 +60,9 @@ class MetricsRegionServerWrapperImpl
 
   private BlockCache blockCache;
   private MobFileCache mobFileCache;
+  private CacheStats cacheStats;
+  private CacheStats l1Stats = null;
+  private CacheStats l2Stats = null;
 
   private volatile long numStores = 0;
   private volatile long numWALFiles = 0;
@@ -74,8 +76,10 @@ class MetricsRegionServerWrapperImpl
   private volatile long numReferenceFiles = 0;
   private volatile double requestsPerSecond = 0.0;
   private volatile long readRequestsCount = 0;
+  private volatile double readRequestsRatePerSecond = 0;
   private volatile long filteredReadRequestsCount = 0;
   private volatile long writeRequestsCount = 0;
+  private volatile double writeRequestsRatePerSecond = 0;
   private volatile long checkAndMutateChecksFailed = 0;
   private volatile long checkAndMutateChecksPassed = 0;
   private volatile long storefileIndexSize = 0;
@@ -108,9 +112,6 @@ class MetricsRegionServerWrapperImpl
   private volatile long blockedRequestsCount = 0L;
   private volatile long averageRegionSize = 0L;
 
-  private CacheStats cacheStats;
-  private CacheStats l1Stats = null;
-  private CacheStats l2Stats = null;
   private ScheduledExecutorService executor;
   private Runnable runnable;
   private long period;
@@ -145,34 +146,26 @@ class MetricsRegionServerWrapperImpl
     }
   }
 
-  /**
-   * It's possible that due to threading the block cache could not be initialized
-   * yet (testing multiple region servers in one jvm).  So we need to try and initialize
-   * the blockCache and cacheStats reference multiple times until we succeed.
-   */
-  private synchronized  void initBlockCache() {
-    CacheConfig cacheConfig = this.regionServer.cacheConfig;
-    if (cacheConfig != null) {
-      l1Stats = cacheConfig.getOnHeapCacheStats();
-      l2Stats = cacheConfig.getL2CacheStats();
-      if (this.blockCache == null) {
-        this.blockCache = cacheConfig.getBlockCache();
+  private void initBlockCache() {
+    this.blockCache = this.regionServer.getBlockCache().orElse(null);
+    this.cacheStats = this.blockCache != null ? this.blockCache.getStats() : null;
+    if (this.cacheStats != null) {
+      if (this.cacheStats instanceof CombinedBlockCache.CombinedCacheStats) {
+        l1Stats = ((CombinedBlockCache.CombinedCacheStats) this.cacheStats)
+          .getLruCacheStats();
+        l2Stats = ((CombinedBlockCache.CombinedCacheStats) this.cacheStats)
+          .getBucketCacheStats();
+      } else {
+        l1Stats = this.cacheStats;
       }
-    }
-
-    if (this.blockCache != null && this.cacheStats == null) {
-      this.cacheStats = blockCache.getStats();
     }
   }
 
   /**
    * Initializes the mob file cache.
    */
-  private synchronized void initMobFileCache() {
-    MobCacheConfig mobCacheConfig = this.regionServer.mobCacheConfig;
-    if (mobCacheConfig != null && this.mobFileCache == null) {
-      this.mobFileCache = mobCacheConfig.getMobFileCache();
-    }
+  private void initMobFileCache() {
+    this.mobFileCache = this.regionServer.getMobFileCache().orElse(null);
   }
 
   @Override
@@ -277,10 +270,7 @@ class MetricsRegionServerWrapperImpl
 
   @Override
   public long getBlockCacheCount() {
-    if (this.blockCache == null) {
-      return 0;
-    }
-    return this.blockCache.getBlockCount();
+    return this.blockCache != null ? this.blockCache.getBlockCount() : 0L;
   }
 
   @Override
@@ -290,74 +280,47 @@ class MetricsRegionServerWrapperImpl
 
   @Override
   public long getBlockCacheSize() {
-    if (this.blockCache == null) {
-      return 0;
-    }
-    return this.blockCache.getCurrentSize();
+    return this.blockCache != null ? this.blockCache.getCurrentSize() : 0L;
   }
 
   @Override
   public long getBlockCacheFreeSize() {
-    if (this.blockCache == null) {
-      return 0;
-    }
-    return this.blockCache.getFreeSize();
+    return this.blockCache != null ? this.blockCache.getFreeSize() : 0L;
   }
 
   @Override
   public long getBlockCacheHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return this.cacheStats.getHitCount();
+    return this.cacheStats != null ? this.cacheStats.getHitCount() : 0L;
   }
 
   @Override
   public long getBlockCachePrimaryHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return this.cacheStats.getPrimaryHitCount();
+    return this.cacheStats != null ? this.cacheStats.getPrimaryHitCount() : 0L;
   }
 
   @Override
   public long getBlockCacheMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return this.cacheStats.getMissCount();
+    return this.cacheStats != null ? this.cacheStats.getMissCount() : 0L;
   }
 
   @Override
   public long getBlockCachePrimaryMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return this.cacheStats.getPrimaryMissCount();
+    return this.cacheStats != null ? this.cacheStats.getPrimaryMissCount() : 0L;
   }
 
   @Override
   public long getBlockCacheEvictedCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return this.cacheStats.getEvictedCount();
+    return this.cacheStats != null ? this.cacheStats.getEvictedCount() : 0L;
   }
 
   @Override
   public long getBlockCachePrimaryEvictedCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return this.cacheStats.getPrimaryEvictedCount();
+    return this.cacheStats != null ? this.cacheStats.getPrimaryEvictedCount() : 0L;
   }
 
   @Override
   public double getBlockCacheHitPercent() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    double ratio = this.cacheStats.getHitRatio();
+    double ratio = this.cacheStats != null ? this.cacheStats.getHitRatio() : 0.0;
     if (Double.isNaN(ratio)) {
       ratio = 0;
     }
@@ -366,12 +329,7 @@ class MetricsRegionServerWrapperImpl
 
   @Override
   public double getBlockCacheHitCachingPercent() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-
-    double ratio = this.cacheStats.getHitCachingRatio();
-
+    double ratio = this.cacheStats != null ? this.cacheStats.getHitCachingRatio() : 0.0;
     if (Double.isNaN(ratio)) {
       ratio = 0;
     }
@@ -380,74 +338,47 @@ class MetricsRegionServerWrapperImpl
 
   @Override
   public long getBlockCacheFailedInsertions() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return this.cacheStats.getFailedInserts();
+    return this.cacheStats != null ? this.cacheStats.getFailedInserts() : 0L;
   }
 
   @Override
   public long getL1CacheHitCount() {
-    if (this.l1Stats == null) {
-      return 0;
-    }
-    return this.l1Stats.getHitCount();
+    return this.l1Stats != null ? this.l1Stats.getHitCount() : 0L;
   }
 
   @Override
   public long getL1CacheMissCount() {
-    if (this.l1Stats == null) {
-      return 0;
-    }
-    return this.l1Stats.getMissCount();
+    return this.l1Stats != null ? this.l1Stats.getMissCount() : 0L;
   }
 
   @Override
   public double getL1CacheHitRatio() {
-    if (this.l1Stats == null) {
-      return 0;
-    }
-    return this.l1Stats.getHitRatio();
+    return this.l1Stats != null ? this.l1Stats.getHitRatio() : 0.0;
   }
 
   @Override
   public double getL1CacheMissRatio() {
-    if (this.l1Stats == null) {
-      return 0;
-    }
-    return this.l1Stats.getMissRatio();
+    return this.l1Stats != null ? this.l1Stats.getMissRatio() : 0.0;
   }
 
   @Override
   public long getL2CacheHitCount() {
-    if (this.l2Stats == null) {
-      return 0;
-    }
-    return this.l2Stats.getHitCount();
+    return this.l2Stats != null ? this.l2Stats.getHitCount() : 0L;
   }
 
   @Override
   public long getL2CacheMissCount() {
-    if (this.l2Stats == null) {
-      return 0;
-    }
-    return this.l2Stats.getMissCount();
+    return this.l2Stats != null ? this.l2Stats.getMissCount() : 0L;
   }
 
   @Override
   public double getL2CacheHitRatio() {
-    if (this.l2Stats == null) {
-      return 0;
-    }
-    return this.l2Stats.getHitRatio();
+    return this.l2Stats != null ? this.l2Stats.getHitRatio() : 0.0;
   }
 
   @Override
   public double getL2CacheMissRatio() {
-    if (this.l2Stats == null) {
-      return 0;
-    }
-    return this.l2Stats.getMissRatio();
+    return this.l2Stats != null ? this.l2Stats.getMissRatio() : 0.0;
   }
 
   @Override public void forceRecompute() {
@@ -519,6 +450,11 @@ class MetricsRegionServerWrapperImpl
   }
 
   @Override
+  public double getReadRequestsRatePerSecond() {
+    return readRequestsRatePerSecond;
+  }
+
+  @Override
   public long getFilteredReadRequestsCount() {
     return filteredReadRequestsCount;
   }
@@ -526,6 +462,11 @@ class MetricsRegionServerWrapperImpl
   @Override
   public long getWriteRequestsCount() {
     return writeRequestsCount;
+  }
+
+  @Override
+  public double getWriteRequestsRatePerSecond() {
+    return writeRequestsRatePerSecond;
   }
 
   @Override
@@ -710,13 +651,12 @@ class MetricsRegionServerWrapperImpl
 
     private long lastRan = 0;
     private long lastRequestCount = 0;
+    private long lastReadRequestsCount = 0;
+    private long lastWriteRequestsCount = 0;
 
     @Override
     synchronized public void run() {
       try {
-        initBlockCache();
-        initMobFileCache();
-
         HDFSBlocksDistribution hdfsBlocksDistribution =
             new HDFSBlocksDistribution();
         HDFSBlocksDistribution hdfsBlocksDistributionSecondaryRegions =
@@ -841,10 +781,25 @@ class MetricsRegionServerWrapperImpl
         }
         // If we've time traveled keep the last requests per second.
         if ((currentTime - lastRan) > 0) {
-          long currentRequestCount = getTotalRequestCount();
+          long currentRequestCount = getTotalRowActionRequestCount();
           requestsPerSecond = (currentRequestCount - lastRequestCount) /
               ((currentTime - lastRan) / 1000.0);
           lastRequestCount = currentRequestCount;
+
+          long intervalReadRequestsCount = tempReadRequestsCount - lastReadRequestsCount;
+          long intervalWriteRequestsCount = tempWriteRequestsCount - lastWriteRequestsCount;
+
+          double readRequestsRatePerMilliSecond = ((double)intervalReadRequestsCount/
+              (double)period);
+          double writeRequestsRatePerMilliSecond = ((double)intervalWriteRequestsCount/
+              (double)period);
+
+          readRequestsRatePerSecond = readRequestsRatePerMilliSecond * 1000.0;
+          writeRequestsRatePerSecond = writeRequestsRatePerMilliSecond * 1000.0;
+
+          lastReadRequestsCount = tempReadRequestsCount;
+          lastWriteRequestsCount = tempWriteRequestsCount;
+
         }
         lastRan = currentTime;
 
@@ -899,12 +854,14 @@ class MetricsRegionServerWrapperImpl
         mobFlushedCellsSize = tempMobFlushedCellsSize;
         mobScanCellsCount = tempMobScanCellsCount;
         mobScanCellsSize = tempMobScanCellsSize;
-        mobFileCacheAccessCount = mobFileCache.getAccessCount();
-        mobFileCacheMissCount = mobFileCache.getMissCount();
-        mobFileCacheHitRatio = Double.
-            isNaN(mobFileCache.getHitRatio())?0:mobFileCache.getHitRatio();
-        mobFileCacheEvictedCount = mobFileCache.getEvictedFileCount();
-        mobFileCacheCount = mobFileCache.getCacheSize();
+        mobFileCacheAccessCount = mobFileCache != null ? mobFileCache.getAccessCount() : 0L;
+        mobFileCacheMissCount = mobFileCache != null ? mobFileCache.getMissCount() : 0L;
+        mobFileCacheHitRatio = mobFileCache != null ? mobFileCache.getHitRatio() : 0.0;
+        if (Double.isNaN(mobFileCacheHitRatio)) {
+          mobFileCacheHitRatio = 0.0;
+        }
+        mobFileCacheEvictedCount = mobFileCache != null ? mobFileCache.getEvictedFileCount() : 0L;
+        mobFileCacheCount = mobFileCache != null ? mobFileCache.getCacheSize() : 0;
         blockedRequestsCount = tempBlockedRequestsCount;
       } catch (Throwable e) {
         LOG.warn("Caught exception! Will suppress and retry.", e);
@@ -934,161 +891,101 @@ class MetricsRegionServerWrapperImpl
 
   @Override
   public long getDataMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getDataMissCount();
+    return this.cacheStats != null ? this.cacheStats.getDataMissCount() : 0L;
   }
 
   @Override
   public long getLeafIndexMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getLeafIndexMissCount();
+    return this.cacheStats != null ? this.cacheStats.getLeafIndexMissCount() : 0L;
   }
 
   @Override
   public long getBloomChunkMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getBloomChunkMissCount();
+    return this.cacheStats != null ? this.cacheStats.getBloomChunkMissCount() : 0L;
   }
 
   @Override
   public long getMetaMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getMetaMissCount();
+    return this.cacheStats != null ? this.cacheStats.getMetaMissCount() : 0L;
   }
 
   @Override
   public long getRootIndexMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getRootIndexMissCount();
+    return this.cacheStats != null ? this.cacheStats.getRootIndexMissCount() : 0L;
   }
 
   @Override
   public long getIntermediateIndexMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getIntermediateIndexMissCount();
+    return this.cacheStats != null ? this.cacheStats.getIntermediateIndexMissCount() : 0L;
   }
 
   @Override
   public long getFileInfoMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getFileInfoMissCount();
+    return this.cacheStats != null ? this.cacheStats.getFileInfoMissCount() : 0L;
   }
 
   @Override
   public long getGeneralBloomMetaMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getGeneralBloomMetaMissCount();
+    return this.cacheStats != null ? this.cacheStats.getGeneralBloomMetaMissCount() : 0L;
   }
 
   @Override
   public long getDeleteFamilyBloomMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getDeleteFamilyBloomMissCount();
+    return this.cacheStats != null ? this.cacheStats.getDeleteFamilyBloomMissCount() : 0L;
   }
 
   @Override
   public long getTrailerMissCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getTrailerMissCount();
+    return this.cacheStats != null ? this.cacheStats.getTrailerMissCount() : 0L;
   }
 
   @Override
   public long getDataHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getDataHitCount();
+    return this.cacheStats != null ? this.cacheStats.getDataHitCount() : 0L;
   }
 
   @Override
   public long getLeafIndexHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getLeafIndexHitCount();
+    return this.cacheStats != null ? this.cacheStats.getLeafIndexHitCount() : 0L;
   }
 
   @Override
   public long getBloomChunkHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getBloomChunkHitCount();
+    return this.cacheStats != null ? this.cacheStats.getBloomChunkHitCount() : 0L;
   }
 
   @Override
   public long getMetaHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getMetaHitCount();
+    return this.cacheStats != null ? this.cacheStats.getMetaHitCount() : 0L;
   }
 
   @Override
   public long getRootIndexHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getRootIndexHitCount();
+    return this.cacheStats != null ? this.cacheStats.getRootIndexHitCount() : 0L;
   }
 
   @Override
   public long getIntermediateIndexHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getIntermediateIndexHitCount();
+    return this.cacheStats != null ? this.cacheStats.getIntermediateIndexHitCount() : 0L;
   }
 
   @Override
   public long getFileInfoHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getFileInfoHitCount();
+    return this.cacheStats != null ? this.cacheStats.getFileInfoHitCount() : 0L;
   }
 
   @Override
   public long getGeneralBloomMetaHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getGeneralBloomMetaHitCount();
+    return this.cacheStats != null ? this.cacheStats.getGeneralBloomMetaHitCount() : 0L;
   }
 
   @Override
   public long getDeleteFamilyBloomHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getDeleteFamilyBloomHitCount();
+    return this.cacheStats != null ? this.cacheStats.getDeleteFamilyBloomHitCount() : 0L;
   }
 
   @Override
   public long getTrailerHitCount() {
-    if (this.cacheStats == null) {
-      return 0;
-    }
-    return cacheStats.getTrailerHitCount();
+    return this.cacheStats != null ? this.cacheStats.getTrailerHitCount() : 0L;
   }
 }

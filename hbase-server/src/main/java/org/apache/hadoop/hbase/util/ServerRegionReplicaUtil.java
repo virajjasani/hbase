@@ -19,7 +19,6 @@
 package org.apache.hadoop.hbase.util;
 
 import java.io.IOException;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -35,12 +34,14 @@ import org.apache.hadoop.hbase.regionserver.StoreFileInfo;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
 import org.apache.hadoop.hbase.replication.regionserver.RegionReplicaReplicationEndpoint;
 import org.apache.hadoop.hbase.zookeeper.ZKConfig;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Similar to {@link RegionReplicaUtil} but for the server side
  */
+@InterfaceAudience.Private
 public class ServerRegionReplicaUtil extends RegionReplicaUtil {
 
   private static final Logger LOG = LoggerFactory.getLogger(ServerRegionReplicaUtil.class);
@@ -127,15 +128,28 @@ public class ServerRegionReplicaUtil extends RegionReplicaUtil {
     }
 
     // else create a store file link. The link file does not exists on filesystem though.
-    HFileLink link = HFileLink.build(conf, regionInfoForFs.getTable(),
-            regionInfoForFs.getEncodedName(), familyName, path.getName());
-
-    if (StoreFileInfo.isReference(path)) {
+    if (HFileLink.isHFileLink(path) || StoreFileInfo.isHFile(path)) {
+      HFileLink link = HFileLink
+          .build(conf, regionInfoForFs.getTable(), regionInfoForFs.getEncodedName(), familyName,
+              path.getName());
+      return new StoreFileInfo(conf, fs, link.getFileStatus(fs), link);
+    } else if (StoreFileInfo.isReference(path)) {
       Reference reference = Reference.read(fs, path);
-      return new StoreFileInfo(conf, fs, link.getFileStatus(fs), reference);
+      Path referencePath = StoreFileInfo.getReferredToFile(path);
+      if (HFileLink.isHFileLink(referencePath)) {
+        // HFileLink Reference
+        HFileLink link = HFileLink.buildFromHFileLinkPattern(conf, referencePath);
+        return new StoreFileInfo(conf, fs, link.getFileStatus(fs), reference, link);
+      } else {
+        // Reference
+        HFileLink link = HFileLink
+            .build(conf, regionInfoForFs.getTable(), regionInfoForFs.getEncodedName(), familyName,
+                path.getName());
+        return new StoreFileInfo(conf, fs, link.getFileStatus(fs), reference);
+      }
+    } else {
+      throw new IOException("path=" + path + " doesn't look like a valid StoreFile");
     }
-
-    return new StoreFileInfo(conf, fs, link.getFileStatus(fs), link);
   }
 
   /**

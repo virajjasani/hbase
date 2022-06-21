@@ -34,8 +34,6 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -89,6 +87,8 @@ import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests the table import and table export MR job functionality
@@ -100,7 +100,7 @@ public class TestCellBasedImportExport2 {
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestCellBasedImportExport2.class);
 
-  private static final Log LOG = LogFactory.getLog(TestCellBasedImportExport2.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCellBasedImportExport2.class);
   protected static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
   private static final byte[] ROW1 = Bytes.toBytesBinary("\\x32row1");
   private static final byte[] ROW2 = Bytes.toBytesBinary("\\x32row2");
@@ -297,7 +297,7 @@ public class TestCellBasedImportExport2 {
    public void testExportScannerBatching() throws Throwable {
     TableDescriptor desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(1)
               .build())
             .build();
@@ -328,7 +328,7 @@ public class TestCellBasedImportExport2 {
   public void testWithDeletes() throws Throwable {
     TableDescriptor desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .setKeepDeletedCells(KeepDeletedCells.TRUE)
               .build())
@@ -362,7 +362,7 @@ public class TestCellBasedImportExport2 {
     final String IMPORT_TABLE = name.getMethodName() + "import";
     desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(IMPORT_TABLE))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .setKeepDeletedCells(KeepDeletedCells.TRUE)
               .build())
@@ -397,7 +397,7 @@ public class TestCellBasedImportExport2 {
     final TableName exportTable = TableName.valueOf(name.getMethodName());
     TableDescriptor desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .setKeepDeletedCells(KeepDeletedCells.TRUE)
               .build())
@@ -435,7 +435,7 @@ public class TestCellBasedImportExport2 {
     final String importTable = name.getMethodName() + "import";
     desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(importTable))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .setKeepDeletedCells(KeepDeletedCells.TRUE)
               .build())
@@ -477,7 +477,7 @@ public class TestCellBasedImportExport2 {
     // Create simple table to export
     TableDescriptor desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(name.getMethodName()))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .build())
             .build();
@@ -505,7 +505,7 @@ public class TestCellBasedImportExport2 {
     final String IMPORT_TABLE = name.getMethodName() + "import";
     desc = TableDescriptorBuilder
             .newBuilder(TableName.valueOf(IMPORT_TABLE))
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
+            .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILYA)
               .setMaxVersions(5)
               .build())
             .build();

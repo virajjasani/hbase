@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,7 +18,6 @@
 package org.apache.hadoop.hbase.replication.regionserver;
 
 import java.io.IOException;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileSystem;
@@ -33,55 +32,36 @@ import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.util.FSUtils;
-import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
- * In a scenario of Replication based Disaster/Recovery, when hbase
- * Master-Cluster crashes, this tool is used to sync-up the delta from Master to
- * Slave using the info from ZooKeeper. The tool will run on Master-Cluser, and
- * assume ZK, Filesystem and NetWork still available after hbase crashes
+ * In a scenario of Replication based Disaster/Recovery, when hbase Master-Cluster crashes, this
+ * tool is used to sync-up the delta from Master to Slave using the info from ZooKeeper. The tool
+ * will run on Master-Cluser, and assume ZK, Filesystem and NetWork still available after hbase
+ * crashes
  *
+ * <pre>
  * hbase org.apache.hadoop.hbase.replication.regionserver.ReplicationSyncUp
+ * </pre>
  */
-
+@InterfaceAudience.Private
 public class ReplicationSyncUp extends Configured implements Tool {
-
-  private static final Logger LOG = LoggerFactory.getLogger(ReplicationSyncUp.class.getName());
-
-  private static Configuration conf;
 
   private static final long SLEEP_TIME = 10000;
 
-  // although the tool is designed to be run on command line
-  // this api is provided for executing the tool through another app
-  public static void setConfigure(Configuration config) {
-    conf = config;
-  }
-
   /**
    * Main program
-   * @param args
-   * @throws Exception
    */
   public static void main(String[] args) throws Exception {
-    if (conf == null) conf = HBaseConfiguration.create();
-    int ret = ToolRunner.run(conf, new ReplicationSyncUp(), args);
+    int ret = ToolRunner.run(HBaseConfiguration.create(), new ReplicationSyncUp(), args);
     System.exit(ret);
   }
 
   @Override
   public int run(String[] args) throws Exception {
-    Replication replication;
-    ReplicationSourceManager manager;
-    FileSystem fs;
-    Path oldLogDir, logDir, walRootDir;
-    ZKWatcher zkw;
-
     Abortable abortable = new Abortable() {
       @Override
       public void abort(String why, Throwable e) {
@@ -92,45 +72,39 @@ public class ReplicationSyncUp extends Configured implements Tool {
         return false;
       }
     };
+    Configuration conf = getConf();
+    try (ZKWatcher zkw =
+      new ZKWatcher(conf, "syncupReplication" + System.currentTimeMillis(), abortable, true)) {
+      Path walRootDir = FSUtils.getWALRootDir(conf);
+      FileSystem fs = FSUtils.getWALFileSystem(conf);
+      Path oldLogDir = new Path(walRootDir, HConstants.HREGION_OLDLOGDIR_NAME);
+      Path logDir = new Path(walRootDir, HConstants.HREGION_LOGDIR_NAME);
 
-    zkw =
-        new ZKWatcher(conf, "syncupReplication" + System.currentTimeMillis(), abortable,
-            true);
-
-    walRootDir = FSUtils.getWALRootDir(conf);
-    fs = FSUtils.getWALFileSystem(conf);
-    oldLogDir = new Path(walRootDir, HConstants.HREGION_OLDLOGDIR_NAME);
-    logDir = new Path(walRootDir, HConstants.HREGION_LOGDIR_NAME);
-
-    System.out.println("Start Replication Server start");
-    replication = new Replication();
-    replication.initialize(new DummyServer(zkw), fs, logDir, oldLogDir, null);
-    manager = replication.getReplicationManager();
-    manager.init();
-
-    try {
-      int numberOfOldSource = 1; // default wait once
-      while (numberOfOldSource > 0) {
+      System.out.println("Start Replication Server start");
+      Replication replication = new Replication();
+      replication.initialize(new DummyServer(zkw), fs, logDir, oldLogDir, null);
+      ReplicationSourceManager manager = replication.getReplicationManager();
+      manager.init().get();
+      while (manager.activeFailoverTaskCount() > 0) {
         Thread.sleep(SLEEP_TIME);
-        numberOfOldSource = manager.getOldSources().size();
       }
+      while (manager.getOldSources().size() > 0) {
+        Thread.sleep(SLEEP_TIME);
+      }
+      manager.join();
     } catch (InterruptedException e) {
       System.err.println("didn't wait long enough:" + e);
-      return (-1);
+      return -1;
     }
-
-    manager.join();
-    zkw.close();
-
-    return (0);
+    return 0;
   }
 
-  static class DummyServer implements Server {
+  class DummyServer implements Server {
     String hostname;
     ZKWatcher zkw;
 
     DummyServer(ZKWatcher zkw) {
-      // an unique name in case the first run fails
+      // a unique name in case the first run fails
       hostname = System.currentTimeMillis() + ".SyncUpTool.replication.org";
       this.zkw = zkw;
     }
@@ -141,7 +115,7 @@ public class ReplicationSyncUp extends Configured implements Tool {
 
     @Override
     public Configuration getConfiguration() {
-      return conf;
+      return getConf();
     }
 
     @Override
@@ -151,11 +125,6 @@ public class ReplicationSyncUp extends Configured implements Tool {
 
     @Override
     public CoordinatedStateManager getCoordinatedStateManager() {
-      return null;
-    }
-
-    @Override
-    public MetaTableLocator getMetaTableLocator() {
       return null;
     }
 
@@ -194,7 +163,6 @@ public class ReplicationSyncUp extends Configured implements Tool {
 
     @Override
     public ClusterConnection getClusterConnection() {
-      // TODO Auto-generated method stub
       return null;
     }
 

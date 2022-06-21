@@ -1,5 +1,4 @@
 /**
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -48,14 +47,19 @@ import org.apache.hadoop.hbase.ipc.CoprocessorRpcChannel;
 import org.apache.hadoop.hbase.quotas.QuotaFilter;
 import org.apache.hadoop.hbase.quotas.QuotaRetriever;
 import org.apache.hadoop.hbase.quotas.QuotaSettings;
+import org.apache.hadoop.hbase.quotas.SpaceQuotaSnapshotView;
 import org.apache.hadoop.hbase.regionserver.wal.FailedLogCloseException;
 import org.apache.hadoop.hbase.replication.ReplicationException;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
 import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+import org.apache.hadoop.hbase.security.access.GetUserPermissionsRequest;
+import org.apache.hadoop.hbase.security.access.Permission;
+import org.apache.hadoop.hbase.security.access.UserPermission;
 import org.apache.hadoop.hbase.snapshot.HBaseSnapshotException;
 import org.apache.hadoop.hbase.snapshot.RestoreSnapshotException;
 import org.apache.hadoop.hbase.snapshot.SnapshotCreationException;
 import org.apache.hadoop.hbase.snapshot.UnknownSnapshotException;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.yetus.audience.InterfaceAudience;
 
@@ -294,7 +298,6 @@ public interface Admin extends Abortable, Closeable {
    * @throws org.apache.hadoop.hbase.MasterNotRunningException if master is not running
    * @throws org.apache.hadoop.hbase.TableExistsException if table already exists (If concurrent
    * threads, the table may have been created between test-for-existence and attempt-at-creation).
-   * @throws IOException
    */
   void createTable(TableDescriptor desc, byte[] startKey, byte[] endKey, int numRegions)
       throws IOException;
@@ -316,22 +319,35 @@ public interface Admin extends Abortable, Closeable {
   void createTable(TableDescriptor desc, byte[][] splitKeys) throws IOException;
 
   /**
-   * Creates a new table but does not block and wait for it to come online.
-   * You can use Future.get(long, TimeUnit) to wait on the operation to complete.
-   * It may throw ExecutionException if there was an error while executing the operation
-   * or TimeoutException in case the wait timeout was not long enough to allow the
-   * operation to complete.
-   * Throws IllegalArgumentException Bad table name, if the split keys
-   *    are repeated and if the split key has empty byte array.
-   *
+   * Creates a new table but does not block and wait for it to come online. You can use
+   * Future.get(long, TimeUnit) to wait on the operation to complete. It may throw
+   * ExecutionException if there was an error while executing the operation or TimeoutException in
+   * case the wait timeout was not long enough to allow the operation to complete.
+   * <p/>
+   * Throws IllegalArgumentException Bad table name, if the split keys are repeated and if the split
+   * key has empty byte array.
+   * @param desc table descriptor for table
+   * @throws IOException if a remote or network exception occurs
+   * @return the result of the async creation. You can use Future.get(long, TimeUnit) to wait on the
+   *         operation to complete.
+   */
+  Future<Void> createTableAsync(TableDescriptor desc) throws IOException;
+
+  /**
+   * Creates a new table but does not block and wait for it to come online. You can use
+   * Future.get(long, TimeUnit) to wait on the operation to complete. It may throw
+   * ExecutionException if there was an error while executing the operation or TimeoutException in
+   * case the wait timeout was not long enough to allow the operation to complete.
+   * <p/>
+   * Throws IllegalArgumentException Bad table name, if the split keys are repeated and if the split
+   * key has empty byte array.
    * @param desc table descriptor for table
    * @param splitKeys keys to check if the table has been created with all split keys
    * @throws IOException if a remote or network exception occurs
-   * @return the result of the async creation. You can use Future.get(long, TimeUnit)
-   *    to wait on the operation to complete.
+   * @return the result of the async creation. You can use Future.get(long, TimeUnit) to wait on the
+   *         operation to complete.
    */
-  Future<Void> createTableAsync(TableDescriptor desc, byte[][] splitKeys)
-      throws IOException;
+  Future<Void> createTableAsync(TableDescriptor desc, byte[][] splitKeys) throws IOException;
 
   /**
    * Deletes a table. Synchronous operation.
@@ -997,6 +1013,19 @@ public interface Admin extends Abortable, Closeable {
   }
 
   /**
+   * Turn the compaction on or off. Disabling compactions will also interrupt any currently ongoing
+   * compactions. This state is ephemeral. The setting will be lost on restart. Compaction
+   * can also be enabled/disabled by modifying configuration hbase.regionserver.compaction.enabled
+   * in hbase-site.xml.
+   *
+   * @param switchState     Set to <code>true</code> to enable, <code>false</code> to disable.
+   * @param serverNamesList list of region servers.
+   * @return Previous compaction states for region servers
+   */
+  Map<ServerName, Boolean> compactionSwitch(boolean switchState, List<String> serverNamesList)
+      throws IOException;
+
+  /**
    * Compact all regions on the region server. Asynchronous operation in that this method requests
    * that a Compaction run and then it returns. It does not wait on the completion of Compaction (it
    * can take a while).
@@ -1015,19 +1044,51 @@ public interface Admin extends Abortable, Closeable {
   void majorCompactRegionServer(ServerName serverName) throws IOException;
 
   /**
-   * Move the region <code>r</code> to <code>dest</code>.
-   *
+   * Move the region <code>encodedRegionName</code> to a random server.
    * @param encodedRegionName The encoded region name; i.e. the hash that makes up the region name
-   * suffix: e.g. if regionname is
-   * <code>TestTable,0094429456,1289497600452.527db22f95c8a9e0116f0cc13c680396.</code>,
-   * then the encoded region name is: <code>527db22f95c8a9e0116f0cc13c680396</code>.
-   * @param destServerName The servername of the destination regionserver.  If passed the empty byte
-   * array we'll assign to a random server.  A server name is made of host, port and startcode.
-   * Here is an example: <code> host187.example.com,60020,1289493121758</code>
-   * @throws IOException if we can't find a region named
-   * <code>encodedRegionName</code>
+   *          suffix: e.g. if regionname is
+   *          <code>TestTable,0094429456,1289497600452.527db22f95c8a9e0116f0cc13c680396.</code>,
+   *          then the encoded region name is: <code>527db22f95c8a9e0116f0cc13c680396</code>.
+   * @throws IOException if we can't find a region named <code>encodedRegionName</code>
    */
-  void move(byte[] encodedRegionName, byte[] destServerName) throws IOException;
+  void move(byte[] encodedRegionName) throws IOException;
+
+  /**
+   * Move the region <code>rencodedRegionName</code> to <code>destServerName</code>.
+   * @param encodedRegionName The encoded region name; i.e. the hash that makes up the region name
+   *          suffix: e.g. if regionname is
+   *          <code>TestTable,0094429456,1289497600452.527db22f95c8a9e0116f0cc13c680396.</code>,
+   *          then the encoded region name is: <code>527db22f95c8a9e0116f0cc13c680396</code>.
+   * @param destServerName The servername of the destination regionserver. If passed the empty byte
+   *          array we'll assign to a random server. A server name is made of host, port and
+   *          startcode. Here is an example: <code> host187.example.com,60020,1289493121758</code>
+   * @throws IOException if we can't find a region named <code>encodedRegionName</code>
+   * @deprecated since 2.2.0 and will be removed in 4.0.0. Use {@link #move(byte[], ServerName)}
+   *   instead. And if you want to move the region to a random server, please use
+   *   {@link #move(byte[])}.
+   * @see <a href="https://issues.apache.org/jira/browse/HBASE-22108">HBASE-22108</a>
+   */
+  @Deprecated
+  default void move(byte[] encodedRegionName, byte[] destServerName) throws IOException {
+    if (destServerName == null || destServerName.length == 0) {
+      move(encodedRegionName);
+    } else {
+      move(encodedRegionName, ServerName.valueOf(Bytes.toString(destServerName)));
+    }
+  }
+
+  /**
+   * Move the region <code>rencodedRegionName</code> to <code>destServerName</code>.
+   * @param encodedRegionName The encoded region name; i.e. the hash that makes up the region name
+   *          suffix: e.g. if regionname is
+   *          <code>TestTable,0094429456,1289497600452.527db22f95c8a9e0116f0cc13c680396.</code>,
+   *          then the encoded region name is: <code>527db22f95c8a9e0116f0cc13c680396</code>.
+   * @param destServerName The servername of the destination regionserver. A server name is made of
+   *          host, port and startcode. Here is an example:
+   *          <code> host187.example.com,60020,1289493121758</code>
+   * @throws IOException if we can't find a region named <code>encodedRegionName</code>
+   */
+  void move(byte[] encodedRegionName, ServerName destServerName) throws IOException;
 
   /**
    * Assign a Region.
@@ -1038,7 +1099,7 @@ public interface Admin extends Abortable, Closeable {
   /**
    * Unassign a region from current hosting regionserver.  Region will then be assigned to a
    * regionserver chosen at random.  Region could be reassigned back to the same server.  Use {@link
-   * #move(byte[], byte[])} if you want to control the region movement.
+   * #move(byte[], ServerName)} if you want to control the region movement.
    *
    * @param regionName Region to unassign. Will clear any existing RegionPlan if one found.
    * @param force If <code>true</code>, force unassign (Will remove region from regions-in-transition too if
@@ -1283,33 +1344,35 @@ public interface Admin extends Abortable, Closeable {
 
   /**
    * Merge two regions. Asynchronous operation.
-   *
    * @param nameOfRegionA encoded or full name of region a
    * @param nameOfRegionB encoded or full name of region b
-   * @param forcible <code>true</code> if do a compulsory merge, otherwise we will only merge
-   *          two adjacent regions
-   * @throws IOException
+   * @param forcible <code>true</code> if do a compulsory merge, otherwise we will only merge two
+   *          adjacent regions
    */
-  Future<Void> mergeRegionsAsync(
-      byte[] nameOfRegionA,
-      byte[] nameOfRegionB,
-      boolean forcible) throws IOException;
+  default Future<Void> mergeRegionsAsync(byte[] nameOfRegionA, byte[] nameOfRegionB,
+      boolean forcible) throws IOException {
+    byte[][] nameofRegionsToMerge = new byte[2][];
+    nameofRegionsToMerge[0] = nameOfRegionA;
+    nameofRegionsToMerge[1] = nameOfRegionB;
+    return mergeRegionsAsync(nameofRegionsToMerge, forcible);
+  }
 
   /**
    * Merge regions. Asynchronous operation.
-   *
+   * <p/>
+   * You may get a {@code DoNotRetryIOException} if you pass more than two regions in but the master
+   * does not support merging more than two regions. At least till 2.2.0, we still only support
+   * merging two regions.
    * @param nameofRegionsToMerge encoded or full name of daughter regions
    * @param forcible <code>true</code> if do a compulsory merge, otherwise we will only merge
    *          adjacent regions
-   * @throws IOException
    */
-  Future<Void> mergeRegionsAsync(
-      byte[][] nameofRegionsToMerge,
-      boolean forcible) throws IOException;
+  Future<Void> mergeRegionsAsync(byte[][] nameofRegionsToMerge, boolean forcible)
+      throws IOException;
 
   /**
-   + Split a table. The method will execute split action for each region in table.
-   + Asynchronous operation.
+   * Split a table. The method will execute split action for each region in table.
+   * Asynchronous operation.
    * @param tableName table to split
    * @throws IOException if a remote or network exception occurs
    */
@@ -1348,6 +1411,13 @@ public interface Admin extends Abortable, Closeable {
   @Deprecated
   void splitRegion(byte[] regionName, byte[] splitPoint)
     throws IOException;
+
+  /**
+   * Split an individual region. Asynchronous operation.
+   * @param regionName region to split
+   * @throws IOException if a remote or network exception occurs
+   */
+  Future<Void> splitRegionAsync(byte[] regionName) throws IOException;
 
   /**
    * Split an individual region. Asynchronous operation.
@@ -1415,15 +1485,25 @@ public interface Admin extends Abortable, Closeable {
       throws IOException;
 
   /**
+   * <p>
    * Shuts down the HBase cluster.
-   *
+   * </p>
+   * <p>
+   * Notice that, a success shutdown call may ends with an error since the remote server has already
+   * been shutdown.
+   * </p>
    * @throws IOException if a remote or network exception occurs
    */
   void shutdown() throws IOException;
 
   /**
+   * <p>
    * Shuts down the current HBase master only. Does not shutdown the cluster.
-   *
+   * </p>
+   * <p>
+   * Notice that, a success stopMaster call may ends with an error since the remote server has
+   * already been shutdown.
+   * </p>
    * @throws IOException if a remote or network exception occurs
    * @see #shutdown()
    */
@@ -1714,11 +1794,16 @@ public interface Admin extends Abortable, Closeable {
 
   /**
    * Abort a procedure.
+   * Do not use. Usually it is ignored but if not, it can do more damage than good. See hbck2.
    * @param procId ID of the procedure to abort
    * @param mayInterruptIfRunning if the proc completed at least one step, should it be aborted?
-   * @return <code>true</code> if aborted, <code>false</code> if procedure already completed or does not exist
-   * @throws IOException
+   * @return <code>true</code> if aborted, <code>false</code> if procedure already completed or does
+   *         not exist
+   * @throws IOException if a remote or network exception occurs
+   * @deprecated since 2.1.1 and will be removed in 4.0.0.
+   * @see <a href="https://issues.apache.org/jira/browse/HBASE-21223">HBASE-21223</a>
    */
+  @Deprecated
   boolean abortProcedure(
       long procId,
       boolean mayInterruptIfRunning) throws IOException;
@@ -1729,12 +1814,16 @@ public interface Admin extends Abortable, Closeable {
    * It may throw ExecutionException if there was an error while executing the operation
    * or TimeoutException in case the wait timeout was not long enough to allow the
    * operation to complete.
+   * Do not use. Usually it is ignored but if not, it can do more damage than good. See hbck2.
    *
    * @param procId ID of the procedure to abort
    * @param mayInterruptIfRunning if the proc completed at least one step, should it be aborted?
    * @return <code>true</code> if aborted, <code>false</code> if procedure already completed or does not exist
-   * @throws IOException
+   * @throws IOException if a remote or network exception occurs
+   * @deprecated since 2.1.1 and will be removed in 4.0.0.
+   * @see <a href="https://issues.apache.org/jira/browse/HBASE-21223">HBASE-21223</a>
    */
+  @Deprecated
   Future<Boolean> abortProcedureAsync(
     long procId,
     boolean mayInterruptIfRunning) throws IOException;
@@ -2473,7 +2562,7 @@ public interface Admin extends Abortable, Closeable {
   /**
    * Add a new replication peer for replicating data to slave cluster.
    * @param peerId a short name that identifies the peer
-   * @param peerConfig configuration for the replication slave cluster
+   * @param peerConfig configuration for the replication peer
    * @throws IOException if a remote or network exception occurs
    */
   default void addReplicationPeer(String peerId, ReplicationPeerConfig peerConfig)
@@ -2484,12 +2573,43 @@ public interface Admin extends Abortable, Closeable {
   /**
    * Add a new replication peer for replicating data to slave cluster.
    * @param peerId a short name that identifies the peer
-   * @param peerConfig configuration for the replication slave cluster
+   * @param peerConfig configuration for the replication peer
    * @param enabled peer state, true if ENABLED and false if DISABLED
    * @throws IOException if a remote or network exception occurs
    */
   void addReplicationPeer(String peerId, ReplicationPeerConfig peerConfig, boolean enabled)
       throws IOException;
+
+  /**
+   * Add a new replication peer but does not block and wait for it.
+   * <p>
+   * You can use Future.get(long, TimeUnit) to wait on the operation to complete. It may throw
+   * ExecutionException if there was an error while executing the operation or TimeoutException in
+   * case the wait timeout was not long enough to allow the operation to complete.
+   * @param peerId a short name that identifies the peer
+   * @param peerConfig configuration for the replication peer
+   * @return the result of the async operation
+   * @throws IOException IOException if a remote or network exception occurs
+   */
+  default Future<Void> addReplicationPeerAsync(String peerId, ReplicationPeerConfig peerConfig)
+      throws IOException {
+    return addReplicationPeerAsync(peerId, peerConfig, true);
+  }
+
+  /**
+   * Add a new replication peer but does not block and wait for it.
+   * <p>
+   * You can use Future.get(long, TimeUnit) to wait on the operation to complete. It may throw
+   * ExecutionException if there was an error while executing the operation or TimeoutException in
+   * case the wait timeout was not long enough to allow the operation to complete.
+   * @param peerId a short name that identifies the peer
+   * @param peerConfig configuration for the replication peer
+   * @param enabled peer state, true if ENABLED and false if DISABLED
+   * @return the result of the async operation
+   * @throws IOException IOException if a remote or network exception occurs
+   */
+  Future<Void> addReplicationPeerAsync(String peerId, ReplicationPeerConfig peerConfig,
+      boolean enabled) throws IOException;
 
   /**
    * Remove a peer and stop the replication.
@@ -2499,6 +2619,18 @@ public interface Admin extends Abortable, Closeable {
   void removeReplicationPeer(String peerId) throws IOException;
 
   /**
+   * Remove a replication peer but does not block and wait for it.
+   * <p>
+   * You can use Future.get(long, TimeUnit) to wait on the operation to complete. It may throw
+   * ExecutionException if there was an error while executing the operation or TimeoutException in
+   * case the wait timeout was not long enough to allow the operation to complete.
+   * @param peerId a short name that identifies the peer
+   * @return the result of the async operation
+   * @throws IOException IOException if a remote or network exception occurs
+   */
+  Future<Void> removeReplicationPeerAsync(String peerId) throws IOException;
+
+  /**
    * Restart the replication stream to the specified peer.
    * @param peerId a short name that identifies the peer
    * @throws IOException if a remote or network exception occurs
@@ -2506,11 +2638,35 @@ public interface Admin extends Abortable, Closeable {
   void enableReplicationPeer(String peerId) throws IOException;
 
   /**
+   * Enable a replication peer but does not block and wait for it.
+   * <p>
+   * You can use Future.get(long, TimeUnit) to wait on the operation to complete. It may throw
+   * ExecutionException if there was an error while executing the operation or TimeoutException in
+   * case the wait timeout was not long enough to allow the operation to complete.
+   * @param peerId a short name that identifies the peer
+   * @return the result of the async operation
+   * @throws IOException IOException if a remote or network exception occurs
+   */
+  Future<Void> enableReplicationPeerAsync(String peerId) throws IOException;
+
+  /**
    * Stop the replication stream to the specified peer.
    * @param peerId a short name that identifies the peer
    * @throws IOException if a remote or network exception occurs
    */
   void disableReplicationPeer(String peerId) throws IOException;
+
+  /**
+   * Disable a replication peer but does not block and wait for it.
+   * <p>
+   * You can use Future.get(long, TimeUnit) to wait on the operation to complete. It may throw
+   * ExecutionException if there was an error while executing the operation or TimeoutException in
+   * case the wait timeout was not long enough to allow the operation to complete.
+   * @param peerId a short name that identifies the peer
+   * @return the result of the async operation
+   * @throws IOException IOException if a remote or network exception occurs
+   */
+  Future<Void> disableReplicationPeerAsync(String peerId) throws IOException;
 
   /**
    * Returns the configured ReplicationPeerConfig for the specified peer.
@@ -2523,11 +2679,25 @@ public interface Admin extends Abortable, Closeable {
   /**
    * Update the peerConfig for the specified peer.
    * @param peerId a short name that identifies the peer
-   * @param peerConfig new config for the peer
+   * @param peerConfig new config for the replication peer
    * @throws IOException if a remote or network exception occurs
    */
   void updateReplicationPeerConfig(String peerId,
       ReplicationPeerConfig peerConfig) throws IOException;
+
+  /**
+   * Update the peerConfig for the specified peer but does not block and wait for it.
+   * <p>
+   * You can use Future.get(long, TimeUnit) to wait on the operation to complete. It may throw
+   * ExecutionException if there was an error while executing the operation or TimeoutException in
+   * case the wait timeout was not long enough to allow the operation to complete.
+   * @param peerId a short name that identifies the peer
+   * @param peerConfig new config for the replication peer
+   * @return the result of the async operation
+   * @throws IOException IOException if a remote or network exception occurs
+   */
+  Future<Void> updateReplicationPeerConfigAsync(String peerId, ReplicationPeerConfig peerConfig)
+      throws IOException;
 
   /**
    * Append the replicable table column family config from the specified peer.
@@ -2637,4 +2807,106 @@ public interface Admin extends Abortable, Closeable {
    * @return List of servers that are not cleared
    */
   List<ServerName> clearDeadServers(final List<ServerName> servers) throws IOException;
+
+  /**
+   * Create a new table by cloning the existent table schema.
+   *
+   * @param tableName name of the table to be cloned
+   * @param newTableName name of the new table where the table will be created
+   * @param preserveSplits True if the splits should be preserved
+   * @throws IOException if a remote or network exception occurs
+   */
+  void cloneTableSchema(final TableName tableName, final TableName newTableName,
+      final boolean preserveSplits) throws IOException;
+
+  /**
+   * Switch the rpc throttle enable state.
+   * @param enable Set to <code>true</code> to enable, <code>false</code> to disable.
+   * @return Previous rpc throttle enabled value
+   */
+  boolean switchRpcThrottle(final boolean enable) throws IOException;
+
+  /**
+   * Get if the rpc throttle is enabled.
+   * @return True if rpc throttle is enabled
+   */
+  boolean isRpcThrottleEnabled() throws IOException;
+
+  /**
+   * Switch the exceed throttle quota. If enabled, user/table/namespace throttle quota
+   * can be exceeded if region server has availble quota.
+   * @param enable Set to <code>true</code> to enable, <code>false</code> to disable.
+   * @return Previous exceed throttle enabled value
+   */
+  boolean exceedThrottleQuotaSwitch(final boolean enable) throws IOException;
+
+  /**
+   * Fetches the table sizes on the filesystem as tracked by the HBase Master.
+   */
+  Map<TableName, Long> getSpaceQuotaTableSizes() throws IOException;
+
+  /**
+   * Fetches the observed {@link SpaceQuotaSnapshotView}s observed by a RegionServer.
+   */
+  Map<TableName, ? extends SpaceQuotaSnapshotView> getRegionServerSpaceQuotaSnapshots(
+      ServerName serverName) throws IOException;
+
+  /**
+   * Returns the Master's view of a quota on the given {@code namespace} or null if the Master has
+   * no quota information on that namespace.
+   */
+  SpaceQuotaSnapshotView getCurrentSpaceQuotaSnapshot(String namespace) throws IOException;
+
+  /**
+   * Returns the Master's view of a quota on the given {@code tableName} or null if the Master has
+   * no quota information on that table.
+   */
+  SpaceQuotaSnapshotView getCurrentSpaceQuotaSnapshot(TableName tableName) throws IOException;
+
+  /**
+   * Grants user specific permissions
+   * @param userPermission user name and the specific permission
+   * @param mergeExistingPermissions If set to false, later granted permissions will override
+   *          previous granted permissions. otherwise, it'll merge with previous granted
+   *          permissions.
+   * @throws IOException if a remote or network exception occurs
+   */
+  void grant(UserPermission userPermission, boolean mergeExistingPermissions) throws IOException;
+
+  /**
+   * Revokes user specific permissions
+   * @param userPermission user name and the specific permission
+   * @throws IOException if a remote or network exception occurs
+   */
+  void revoke(UserPermission userPermission) throws IOException;
+
+  /**
+   * Get the global/namespace/table permissions for user
+   * @param getUserPermissionsRequest A request contains which user, global, namespace or table
+   *          permissions needed
+   * @return The user and permission list
+   * @throws IOException if a remote or network exception occurs
+   */
+  List<UserPermission> getUserPermissions(GetUserPermissionsRequest getUserPermissionsRequest)
+      throws IOException;
+
+  /**
+   * Check if the user has specific permissions
+   * @param userName the user name
+   * @param permissions the specific permission list
+   * @return True if user has the specific permissions
+   * @throws IOException if a remote or network exception occurs
+   */
+  List<Boolean> hasUserPermissions(String userName, List<Permission> permissions)
+      throws IOException;
+
+  /**
+   * Check if call user has specific permissions
+   * @param permissions the specific permission list
+   * @return True if user has the specific permissions
+   * @throws IOException if a remote or network exception occurs
+   */
+  default List<Boolean> hasUserPermissions(List<Permission> permissions) throws IOException {
+    return hasUserPermissions(null, permissions);
+  }
 }

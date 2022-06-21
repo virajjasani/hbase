@@ -18,15 +18,18 @@
 
 package org.apache.hadoop.hbase;
 
+import java.util.Comparator;
+
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hbase.thirdparty.com.google.common.primitives.Longs;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.hbase.thirdparty.com.google.common.primitives.Longs;
+
 
 /**
  * Compare two HBase cells.  Do not use this method comparing <code>-ROOT-</code> or
@@ -34,9 +37,13 @@ import org.apache.hbase.thirdparty.com.google.common.primitives.Longs;
  * takes account of the special formatting of the row where we have commas to delimit table from
  * regionname, from row.  See KeyValue for how it has a special comparator to do hbase:meta cells
  * and yet another for -ROOT-.
- * While using this comparator for {{@link #compareRows(Cell, Cell)} et al, the hbase:meta cells
+ * <p>While using this comparator for {{@link #compareRows(Cell, Cell)} et al, the hbase:meta cells
  * format should be taken into consideration, for which the instance of this comparator
  * should be used.  In all other cases the static APIs in this comparator would be enough
+ * <p>HOT methods. We spend a good portion of CPU comparing. Anything that makes the compare
+ * faster will likely manifest at the macro level. See also
+ * {@link BBKVComparator}. Use it when mostly {@link ByteBufferKeyValue}s.
+ * </p>
  */
 @edu.umd.cs.findbugs.annotations.SuppressWarnings(
     value="UNKNOWN",
@@ -57,39 +64,38 @@ public class CellComparatorImpl implements CellComparator {
   public static final CellComparatorImpl META_COMPARATOR = new MetaCellComparator();
 
   @Override
-  public int compare(Cell a, Cell b) {
+  public final int compare(final Cell a, final Cell b) {
     return compare(a, b, false);
   }
 
-  /**
-   * Compare cells.
-   * @param a
-   * @param b
-   * @param ignoreSequenceid True if we are to compare the key portion only and ignore
-   * the sequenceid. Set to false to compare key and consider sequenceid.
-   * @return 0 if equal, -1 if a &lt; b, and +1 if a &gt; b.
-   */
-  public final int compare(final Cell a, final Cell b, boolean ignoreSequenceid) {
-    // row
-    int c = compareRows(a, b);
-    if (c != 0) return c;
+  @Override
+  public int compare(final Cell a, final Cell b, boolean ignoreSequenceid) {
 
-    c = compareWithoutRow(a, b);
-    if(c != 0) return c;
-
-    if (!ignoreSequenceid) {
-      // Negate following comparisons so later edits show up first
-      // mvccVersion: later sorts first
-      return Longs.compare(b.getSequenceId(), a.getSequenceId());
+    int diff = 0;
+    // "Peel off" the most common path.
+    if (a instanceof ByteBufferKeyValue && b instanceof ByteBufferKeyValue) {
+      diff = BBKVComparator.compare((ByteBufferKeyValue)a, (ByteBufferKeyValue)b, ignoreSequenceid);
+      if (diff != 0) {
+        return diff;
+      }
     } else {
-      return c;
+      diff = compareRows(a, b);
+      if (diff != 0) {
+        return diff;
+      }
+
+      diff = compareWithoutRow(a, b);
+      if (diff != 0) {
+        return diff;
+      }
     }
+
+    // Negate following comparisons so later edits show up first mvccVersion: later sorts first
+    return ignoreSequenceid? diff: Long.compare(b.getSequenceId(), a.getSequenceId());
   }
 
   /**
    * Compares the family and qualifier part of the cell
-   * @param left the left cell
-   * @param right the right cell
    * @return 0 if both cells are equal, 1 if left cell is bigger than right, -1 otherwise
    */
   public final int compareColumns(final Cell left, final Cell right) {
@@ -102,8 +108,6 @@ public class CellComparatorImpl implements CellComparator {
 
   /**
    * Compare the families of left and right cell
-   * @param left
-   * @param right
    * @return 0 if both cells are equal, 1 if left cell is bigger than right, -1 otherwise
    */
   @Override
@@ -135,8 +139,6 @@ public class CellComparatorImpl implements CellComparator {
 
   /**
    * Compare the qualifiers part of the left and right cells.
-   * @param left
-   * @param right
    * @return 0 if both cells are equal, 1 if left cell is bigger than right, -1 otherwise
    */
   @Override
@@ -173,35 +175,37 @@ public class CellComparatorImpl implements CellComparator {
    * Compares the rows of the left and right cell.
    * For the hbase:meta case this method is overridden such that it can handle hbase:meta cells.
    * The caller should ensure using the appropriate comparator for hbase:meta.
-   * @param left
-   * @param right
    * @return 0 if both cells are equal, 1 if left cell is bigger than right, -1 otherwise
    */
   @Override
   public int compareRows(final Cell left, final Cell right) {
+    return compareRows(left, left.getRowLength(), right, right.getRowLength());
+  }
+
+  static int compareRows(final Cell left, int leftRowLength, final Cell right, int rightRowLength) {
     // left and right can be exactly the same at the beginning of a row
     if (left == right) {
       return 0;
     }
     if (left instanceof ByteBufferExtendedCell && right instanceof ByteBufferExtendedCell) {
       return ByteBufferUtils.compareTo(((ByteBufferExtendedCell) left).getRowByteBuffer(),
-          ((ByteBufferExtendedCell) left).getRowPosition(), left.getRowLength(),
+          ((ByteBufferExtendedCell) left).getRowPosition(), leftRowLength,
           ((ByteBufferExtendedCell) right).getRowByteBuffer(),
-          ((ByteBufferExtendedCell) right).getRowPosition(), right.getRowLength());
+          ((ByteBufferExtendedCell) right).getRowPosition(), rightRowLength);
     }
     if (left instanceof ByteBufferExtendedCell) {
       return ByteBufferUtils.compareTo(((ByteBufferExtendedCell) left).getRowByteBuffer(),
-          ((ByteBufferExtendedCell) left).getRowPosition(), left.getRowLength(),
-          right.getRowArray(), right.getRowOffset(), right.getRowLength());
+          ((ByteBufferExtendedCell) left).getRowPosition(), leftRowLength,
+          right.getRowArray(), right.getRowOffset(), rightRowLength);
     }
     if (right instanceof ByteBufferExtendedCell) {
       // Notice how we flip the order of the compare here. We used to negate the return value but
       // see what FindBugs says
       // http://findbugs.sourceforge.net/bugDescriptions.html#RV_NEGATING_RESULT_OF_COMPARETO
       // It suggest flipping the order to get same effect and 'safer'.
-      return ByteBufferUtils.compareTo(left.getRowArray(), left.getRowOffset(), left.getRowLength(),
+      return ByteBufferUtils.compareTo(left.getRowArray(), left.getRowOffset(), leftRowLength,
           ((ByteBufferExtendedCell)right).getRowByteBuffer(),
-          ((ByteBufferExtendedCell)right).getRowPosition(), right.getRowLength());
+          ((ByteBufferExtendedCell)right).getRowPosition(), rightRowLength);
     }
     return Bytes.compareTo(left.getRowArray(), left.getRowOffset(), left.getRowLength(),
         right.getRowArray(), right.getRowOffset(), right.getRowLength());
@@ -261,10 +265,14 @@ public class CellComparatorImpl implements CellComparator {
     }
     // Compare cf:qualifier
     int diff = compareColumns(left, right);
-    if (diff != 0) return diff;
+    if (diff != 0) {
+      return diff;
+    }
 
-    diff = compareTimestamps(left, right);
-    if (diff != 0) return diff;
+    diff = compareTimestamps(left.getTimestamp(), right.getTimestamp());
+    if (diff != 0) {
+      return diff;
+    }
 
     // Compare types. Let the delete types sort ahead of puts; i.e. types
     // of higher numbers sort before those of lesser numbers. Maximum (255)
@@ -273,40 +281,15 @@ public class CellComparatorImpl implements CellComparator {
     return (0xff & right.getTypeByte()) - (0xff & left.getTypeByte());
   }
 
-  /**
-   * Compares cell's timestamps in DESCENDING order.
-   * The below older timestamps sorting ahead of newer timestamps looks
-   * wrong but it is intentional. This way, newer timestamps are first
-   * found when we iterate over a memstore and newer versions are the
-   * first we trip over when reading from a store file.
-   * @return 1 if left's timestamp &lt; right's timestamp
-   *         -1 if left's timestamp &gt; right's timestamp
-   *         0 if both timestamps are equal
-   */
   @Override
   public int compareTimestamps(final Cell left, final Cell right) {
     return compareTimestamps(left.getTimestamp(), right.getTimestamp());
   }
 
-
-  /**
-   * Compares timestamps in DESCENDING order.
-   * The below older timestamps sorting ahead of newer timestamps looks
-   * wrong but it is intentional. This way, newer timestamps are first
-   * found when we iterate over a memstore and newer versions are the
-   * first we trip over when reading from a store file.
-   * @return 1 if left timestamp &lt; right timestamp
-   *         -1 if left timestamp &gt; right timestamp
-   *         0 if both timestamps are equal
-   */
   @Override
   public int compareTimestamps(final long ltimestamp, final long rtimestamp) {
-    if (ltimestamp < rtimestamp) {
-      return 1;
-    } else if (ltimestamp > rtimestamp) {
-      return -1;
-    }
-    return 0;
+    // Swap order we pass into compare so we get DESCENDING order.
+    return Long.compare(rtimestamp, ltimestamp);
   }
 
   /**
@@ -314,7 +297,7 @@ public class CellComparatorImpl implements CellComparator {
    * {@link KeyValue}s.
    */
   public static class MetaCellComparator extends CellComparatorImpl {
-
+    // TODO: Do we need a ByteBufferKeyValue version of this?
     @Override
     public int compareRows(final Cell left, final Cell right) {
       return compareRows(left.getRowArray(), left.getRowOffset(), left.getRowLength(),
@@ -327,7 +310,23 @@ public class CellComparatorImpl implements CellComparator {
           roffset, rlength);
     }
 
-    private int compareRows(byte[] left, int loffset, int llength, byte[] right, int roffset,
+    @Override
+    public int compare(final Cell a, final Cell b, boolean ignoreSequenceid) {
+      int diff = compareRows(a, b);
+      if (diff != 0) {
+        return diff;
+      }
+
+      diff = compareWithoutRow(a, b);
+      if (diff != 0) {
+        return diff;
+      }
+
+      // Negate following comparisons so later edits show up first mvccVersion: later sorts first
+      return ignoreSequenceid? diff: Longs.compare(b.getSequenceId(), a.getSequenceId());
+    }
+
+    private static int compareRows(byte[] left, int loffset, int llength, byte[] right, int roffset,
         int rlength) {
       int leftDelimiter = Bytes.searchDelimiterIndex(left, loffset, llength, HConstants.DELIMITER);
       int rightDelimiter = Bytes
@@ -377,5 +376,15 @@ public class CellComparatorImpl implements CellComparator {
           right, rightFarDelimiter, rlength - (rightFarDelimiter - roffset));
       return result;
     }
+
+    @Override
+    public Comparator getSimpleComparator() {
+      return this;
+    }
+  }
+
+  @Override
+  public Comparator getSimpleComparator() {
+    return new BBKVComparator(this);
   }
 }

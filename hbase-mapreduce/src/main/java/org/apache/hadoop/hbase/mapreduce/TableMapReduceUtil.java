@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Enumeration;
 import java.util.HashMap;
@@ -53,7 +54,6 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.UserProvider;
 import org.apache.hadoop.hbase.security.token.TokenUtil;
-import org.apache.hadoop.hbase.util.Base64;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.RegionSplitter;
 import org.apache.hadoop.hbase.zookeeper.ZKConfig;
@@ -552,7 +552,10 @@ public class TableMapReduceUtil {
    * @param job The job that requires the permission.
    * @param quorumAddress string that contains the 3 required configuratins
    * @throws IOException When the authentication token cannot be obtained.
-   * @deprecated Since 1.2.0, use {@link #initCredentialsForCluster(Job, Configuration)} instead.
+   * @deprecated Since 1.2.0 and will be removed in 3.0.0. Use
+   *   {@link #initCredentialsForCluster(Job, Configuration)} instead.
+   * @see #initCredentialsForCluster(Job, Configuration)
+   * @see <a href="https://issues.apache.org/jira/browse/HBASE-14886">HBASE-14886</a>
    */
   @Deprecated
   public static void initCredentialsForCluster(Job job, String quorumAddress)
@@ -597,7 +600,7 @@ public class TableMapReduceUtil {
    */
   public static String convertScanToString(Scan scan) throws IOException {
     ClientProtos.Scan proto = ProtobufUtil.toScan(scan);
-    return Base64.encodeBytes(proto.toByteArray());
+    return Bytes.toString(Base64.getEncoder().encode(proto.toByteArray()));
   }
 
   /**
@@ -608,7 +611,7 @@ public class TableMapReduceUtil {
    * @throws IOException When reading the scan instance fails.
    */
   public static Scan convertStringToScan(String base64) throws IOException {
-    byte [] decoded = Base64.decode(base64);
+    byte [] decoded = Base64.getDecoder().decode(base64);
     return ProtobufUtil.toScan(ClientProtos.Scan.parseFrom(decoded));
   }
 
@@ -811,6 +814,7 @@ public class TableMapReduceUtil {
       org.apache.hadoop.hbase.mapreduce.TableMapper.class,           // hbase-server
       org.apache.hadoop.hbase.metrics.impl.FastLongHistogram.class,  // hbase-metrics
       org.apache.hadoop.hbase.metrics.Snapshot.class,                // hbase-metrics-api
+      org.apache.hbase.thirdparty.com.google.gson.GsonBuilder.class, // hbase-shaded-gson
       org.apache.zookeeper.ZooKeeper.class,
       org.apache.hbase.thirdparty.io.netty.channel.Channel.class,
       com.google.protobuf.Message.class,
@@ -819,9 +823,7 @@ public class TableMapReduceUtil {
       org.apache.htrace.core.Tracer.class,
       com.codahale.metrics.MetricRegistry.class,
       org.apache.commons.lang3.ArrayUtils.class,
-      com.fasterxml.jackson.databind.ObjectMapper.class,
-      com.fasterxml.jackson.core.Versioned.class,
-      com.fasterxml.jackson.annotation.JsonView.class,
+      org.apache.hbase.thirdparty.com.google.gson.Gson.class,
       org.apache.hadoop.hbase.zookeeper.ZKWatcher.class);
   }
 
@@ -876,7 +878,10 @@ public class TableMapReduceUtil {
    * Add the jars containing the given classes to the job's configuration
    * such that JobClient will ship them to the cluster and add them to
    * the DistributedCache.
-   * @deprecated rely on {@link #addDependencyJars(Job)} instead.
+   * @deprecated since 1.3.0 and will be removed in 3.0.0. Use {@link #addDependencyJars(Job)}
+   *   instead.
+   * @see #addDependencyJars(Job)
+   * @see <a href="https://issues.apache.org/jira/browse/HBASE-8386">HBASE-8386</a>
    */
   @Deprecated
   public static void addDependencyJars(Configuration conf,

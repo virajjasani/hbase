@@ -81,6 +81,12 @@ message Get {
   // the existence.
   optional bool existence_only = 10 [default = false];
 
+  // If the row to get doesn't exist, return the
+  // closest row before. Deprecated. No longer used!
+  // Since hbase-2.0.0 but left in place so can test
+  // for Gets with this set and throw Exception.
+  optional bool closest_row_before = 11 [default = false];
+
   optional Consistency consistency = 12 [default = STRONG];
   repeated ColumnFamilyTimeRange cf_time_range = 13;
   optional bool load_column_families_on_demand = 14; /* DO NOT add defaults to load_column_families_on_demand. */
@@ -137,6 +143,7 @@ message Condition {
   required bytes qualifier = 3;
   required CompareType compare_type = 4;
   required Comparator comparator = 5;
+  optional TimeRange time_range = 6;
 }
 
 
@@ -371,6 +378,7 @@ message BulkLoadHFileRequest {
   optional DelegationToken fs_token = 4;
   optional string bulk_token = 5;
   optional bool copy_file = 6 [default = false];
+  repeated string cluster_ids = 7;
 
   message FamilyPath {
     required bytes family = 1;

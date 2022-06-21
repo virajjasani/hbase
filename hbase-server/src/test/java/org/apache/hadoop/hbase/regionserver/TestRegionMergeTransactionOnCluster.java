@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -26,7 +26,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.commons.lang3.RandomUtils;
@@ -35,14 +34,15 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.StartMiniClusterOption;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.UnknownRegionException;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.DoNotRetryRegionException;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionReplicaUtil;
@@ -62,6 +62,7 @@ import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.util.FutureUtils;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.RegionServerThread;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.PairOfSameType;
@@ -117,7 +118,9 @@ public class TestRegionMergeTransactionOnCluster {
   @BeforeClass
   public static void beforeAllTests() throws Exception {
     // Start a cluster
-    TEST_UTIL.startMiniCluster(1, NB_SERVERS, null, MyMaster.class, null);
+    StartMiniClusterOption option = StartMiniClusterOption.builder()
+        .masterClass(MyMaster.class).numRegionServers(NB_SERVERS).numDataNodes(NB_SERVERS).build();
+    TEST_UTIL.startMiniCluster(option);
     MiniHBaseCluster cluster = TEST_UTIL.getHBaseCluster();
     MASTER = cluster.getMaster();
     MASTER.balanceSwitch(false);
@@ -213,15 +216,12 @@ public class TestRegionMergeTransactionOnCluster {
         MASTER.getConnection(), mergedRegionInfo.getRegionName());
 
       // contains merge reference in META
-      assertTrue(mergedRegionResult.getValue(HConstants.CATALOG_FAMILY,
-          HConstants.MERGEA_QUALIFIER) != null);
-      assertTrue(mergedRegionResult.getValue(HConstants.CATALOG_FAMILY,
-          HConstants.MERGEB_QUALIFIER) != null);
+      assertTrue(MetaTableAccessor.hasMergeRegions(mergedRegionResult.rawCells()));
 
       // merging regions' directory are in the file system all the same
-      PairOfSameType<RegionInfo> p = MetaTableAccessor.getMergeRegions(mergedRegionResult);
-      RegionInfo regionA = p.getFirst();
-      RegionInfo regionB = p.getSecond();
+      List<RegionInfo> p = MetaTableAccessor.getMergeRegions(mergedRegionResult.rawCells());
+      RegionInfo regionA = p.get(0);
+      RegionInfo regionB = p.get(1);
       FileSystem fs = MASTER.getMasterFileSystem().getFileSystem();
       Path rootDir = MASTER.getMasterFileSystem().getRootDir();
 
@@ -288,11 +288,7 @@ public class TestRegionMergeTransactionOnCluster {
 
       mergedRegionResult = MetaTableAccessor.getRegionResult(
         TEST_UTIL.getConnection(), mergedRegionInfo.getRegionName());
-      assertFalse(mergedRegionResult.getValue(HConstants.CATALOG_FAMILY,
-          HConstants.MERGEA_QUALIFIER) != null);
-      assertFalse(mergedRegionResult.getValue(HConstants.CATALOG_FAMILY,
-          HConstants.MERGEB_QUALIFIER) != null);
-
+      assertFalse(MetaTableAccessor.hasMergeRegions(mergedRegionResult.rawCells()));
     } finally {
       ADMIN.enableCatalogJanitor(true);
     }
@@ -326,17 +322,16 @@ public class TestRegionMergeTransactionOnCluster {
         admin.mergeRegionsAsync(a.getEncodedNameAsBytes(), b.getEncodedNameAsBytes(), false)
                 .get(syncWaitTimeout, TimeUnit.MILLISECONDS);
         fail("Offline regions should not be able to merge");
-      } catch (ExecutionException ie) {
+      } catch (DoNotRetryRegionException ie) {
         System.out.println(ie);
-        assertTrue("Exception should mention regions not online",
-          StringUtils.stringifyException(ie.getCause()).contains("regions not online")
-            && ie.getCause() instanceof MergeRegionException);
+        assertTrue(ie instanceof MergeRegionException);
       }
 
       try {
         // Merge the same region: b and b.
-        admin.mergeRegionsAsync(b.getEncodedNameAsBytes(), b.getEncodedNameAsBytes(), true);
-        fail("A region should not be able to merge with itself, even forcifully");
+        FutureUtils
+          .get(admin.mergeRegionsAsync(b.getEncodedNameAsBytes(), b.getEncodedNameAsBytes(), true));
+        fail("A region should not be able to merge with itself, even forcfully");
       } catch (IOException ie) {
         assertTrue("Exception should mention regions not online",
           StringUtils.stringifyException(ie).contains("region to itself")

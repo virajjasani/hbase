@@ -18,6 +18,7 @@
  */
 package org.apache.hadoop.hbase.io.hfile;
 
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInput;
@@ -37,6 +38,8 @@ import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HFileProtos;
 import org.apache.hadoop.hbase.util.Bytes;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The {@link HFile} has a fixed trailer which contains offsets to other
@@ -52,6 +55,8 @@ import org.apache.hadoop.hbase.util.Bytes;
  */
 @InterfaceAudience.Private
 public class FixedFileTrailer {
+  private static final Logger LOG = LoggerFactory.getLogger(FixedFileTrailer.class);
+
   /**
    * We store the comparator class name as a fixed-length field in the trailer.
    */
@@ -185,34 +190,37 @@ public class FixedFileTrailer {
     baos.writeTo(outputStream);
   }
 
-  /**
-   * Write trailer data as protobuf
-   * @param outputStream
-   * @throws IOException
-   */
-  void serializeAsPB(DataOutputStream output) throws IOException {
-    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+  @org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting
+  HFileProtos.FileTrailerProto toProtobuf() {
     HFileProtos.FileTrailerProto.Builder builder = HFileProtos.FileTrailerProto.newBuilder()
-      .setFileInfoOffset(fileInfoOffset)
-      .setLoadOnOpenDataOffset(loadOnOpenDataOffset)
-      .setUncompressedDataIndexSize(uncompressedDataIndexSize)
-      .setTotalUncompressedBytes(totalUncompressedBytes)
-      .setDataIndexCount(dataIndexCount)
-      .setMetaIndexCount(metaIndexCount)
-      .setEntryCount(entryCount)
-      .setNumDataIndexLevels(numDataIndexLevels)
-      .setFirstDataBlockOffset(firstDataBlockOffset)
-      .setLastDataBlockOffset(lastDataBlockOffset)
-      // TODO this is a classname encoded into an  HFile's trailer. We are going to need to have
-      // some compat code here.
-      .setComparatorClassName(comparatorClassName)
-      .setCompressionCodec(compressionCodec.ordinal());
+        .setFileInfoOffset(fileInfoOffset)
+        .setLoadOnOpenDataOffset(loadOnOpenDataOffset)
+        .setUncompressedDataIndexSize(uncompressedDataIndexSize)
+        .setTotalUncompressedBytes(totalUncompressedBytes)
+        .setDataIndexCount(dataIndexCount)
+        .setMetaIndexCount(metaIndexCount)
+        .setEntryCount(entryCount)
+        .setNumDataIndexLevels(numDataIndexLevels)
+        .setFirstDataBlockOffset(firstDataBlockOffset)
+        .setLastDataBlockOffset(lastDataBlockOffset)
+        .setComparatorClassName(getHBase1CompatibleName(comparatorClassName))
+        .setCompressionCodec(compressionCodec.ordinal());
     if (encryptionKey != null) {
       builder.setEncryptionKey(UnsafeByteOperations.unsafeWrap(encryptionKey));
     }
+    return builder.build();
+  }
+
+  /**
+   * Write trailer data as protobuf.
+   * NOTE: we run a translation on the comparator name and will serialize the old hbase-1.x where
+   * it makes sense. See {@link #getHBase1CompatibleName(String)}.
+   */
+  void serializeAsPB(DataOutputStream output) throws IOException {
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
     // We need this extra copy unfortunately to determine the final size of the
     // delimited output, see use of baos.size() below.
-    builder.build().writeDelimitedTo(baos);
+    toProtobuf().writeDelimitedTo(baos);
     baos.writeTo(output);
     // Pad to make up the difference between variable PB encoding length and the
     // length when encoded as writable under earlier V2 formats. Failure to pad
@@ -298,8 +306,6 @@ public class FixedFileTrailer {
       lastDataBlockOffset = trailerProto.getLastDataBlockOffset();
     }
     if (trailerProto.hasComparatorClassName()) {
-      // TODO this is a classname encoded into an  HFile's trailer. We are going to need to have 
-      // some compat code here.
       setComparatorClass(getComparatorClass(trailerProto.getComparatorClassName()));
     }
     if (trailerProto.hasCompressionCodec()) {
@@ -548,12 +554,44 @@ public class FixedFileTrailer {
         CellComparator comp = klass.getDeclaredConstructor().newInstance();
         // if the name wasn't one of the legacy names, maybe its a legit new
         // kind of comparator.
-        comparatorClassName = klass.getName();
+        this.comparatorClassName = klass.getName();
       }
-
     } catch (Exception e) {
       throw new RuntimeException("Comparator class " + klass.getName() + " is not instantiable", e);
     }
+  }
+
+  /**
+   * If a 'standard' Comparator, write the old name for the Comparator when we serialize rather
+   * than the new name; writing the new name will make it so newly-written hfiles are not parseable
+   * by hbase-1.x, a facility we'd like to preserve across rolling upgrade and hbase-1.x clusters
+   * reading hbase-2.x produce.
+   *
+   * The Comparators in hbase-2.x work the same as they did in hbase-1.x; they compare
+   * KeyValues. In hbase-2.x they were renamed making use of the more generic 'Cell'
+   * nomenclature to indicate that we intend to move away from KeyValues post hbase-2. A naming
+   * change is not reason enough to make it so hbase-1.x cannot read hbase-2.x files given the
+   * structure goes unchanged (hfile v3). So, lets write the old names for Comparators into the
+   * hfile tails in hbase-2. Here is where we do the translation.
+   * {@link #getComparatorClass(String)} does translation going the other way.
+   *
+   * <p>The translation is done on the serialized Protobuf only.</p>
+   *
+   * @param comparator String class name of the Comparator used in this hfile.
+   * @return What to store in the trailer as our comparator name.
+   * @since hbase-2.0.0.
+   * @deprecated Since hbase-2.0.0. Will be removed in hbase-3.0.0.
+   * @see #getComparatorClass(String)
+   */
+  @Deprecated
+  private String getHBase1CompatibleName(final String comparator) {
+    if (comparator.equals(CellComparatorImpl.class.getName())) {
+      return KeyValue.COMPARATOR.getClass().getName();
+    }
+    if (comparator.equals(MetaCellComparator.class.getName())) {
+      return KeyValue.META_COMPARATOR.getClass().getName();
+    }
+    return comparator;
   }
 
   @SuppressWarnings("unchecked")
@@ -589,7 +627,13 @@ public class FixedFileTrailer {
   public static CellComparator createComparator(
       String comparatorClassName) throws IOException {
     try {
-      return getComparatorClass(comparatorClassName).getDeclaredConstructor().newInstance();
+
+      Class<? extends CellComparator> comparatorClass = getComparatorClass(comparatorClassName);
+      if(comparatorClass != null){
+        return comparatorClass.getDeclaredConstructor().newInstance();
+      }
+      LOG.warn("No Comparator class for " + comparatorClassName + ". Returning Null.");
+      return null;
     } catch (Exception e) {
       throw new IOException("Comparator class " + comparatorClassName +
         " is not instantiable", e);

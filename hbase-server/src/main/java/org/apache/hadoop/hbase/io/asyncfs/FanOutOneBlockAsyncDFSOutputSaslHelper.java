@@ -17,15 +17,70 @@
  */
 package org.apache.hadoop.hbase.io.asyncfs;
 
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_ENCRYPT_DATA_TRANSFER_CIPHER_SUITES_KEY;
 import static org.apache.hbase.thirdparty.io.netty.handler.timeout.IdleState.READER_IDLE;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_ENCRYPT_DATA_TRANSFER_CIPHER_SUITES_KEY;
+
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.security.GeneralSecurityException;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import javax.security.auth.callback.Callback;
+import javax.security.auth.callback.CallbackHandler;
+import javax.security.auth.callback.NameCallback;
+import javax.security.auth.callback.PasswordCallback;
+import javax.security.auth.callback.UnsupportedCallbackException;
+import javax.security.sasl.RealmCallback;
+import javax.security.sasl.RealmChoiceCallback;
+import javax.security.sasl.Sasl;
+import javax.security.sasl.SaslClient;
+import javax.security.sasl.SaslException;
+import org.apache.commons.codec.binary.Base64;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.crypto.CipherOption;
+import org.apache.hadoop.crypto.CipherSuite;
+import org.apache.hadoop.crypto.CryptoCodec;
+import org.apache.hadoop.crypto.Decryptor;
+import org.apache.hadoop.crypto.Encryptor;
+import org.apache.hadoop.crypto.key.KeyProvider;
+import org.apache.hadoop.crypto.key.KeyProvider.KeyVersion;
+import org.apache.hadoop.fs.FileEncryptionInfo;
+import org.apache.hadoop.hdfs.DFSClient;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+import org.apache.hadoop.hdfs.protocol.datatransfer.InvalidEncryptionKeyException;
+import org.apache.hadoop.hdfs.protocol.datatransfer.TrustedChannelResolver;
+import org.apache.hadoop.hdfs.protocol.datatransfer.sasl.SaslDataTransferClient;
+import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.DataTransferEncryptorMessageProto;
+import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.DataTransferEncryptorMessageProto.DataTransferEncryptorStatus;
+import org.apache.hadoop.hdfs.protocolPB.PBHelperClient;
+import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
+import org.apache.hadoop.hdfs.security.token.block.DataEncryptionKey;
+import org.apache.hadoop.security.SaslPropertiesResolver;
+import org.apache.hadoop.security.SaslRpcServer.QualityOfProtection;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.token.Token;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.base.Charsets;
 import org.apache.hbase.thirdparty.com.google.common.base.Throwables;
 import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableSet;
 import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
-import com.google.protobuf.CodedOutputStream;
-
 import org.apache.hbase.thirdparty.io.netty.buffer.ByteBuf;
 import org.apache.hbase.thirdparty.io.netty.buffer.ByteBufOutputStream;
 import org.apache.hbase.thirdparty.io.netty.buffer.CompositeByteBuf;
@@ -44,64 +99,6 @@ import org.apache.hbase.thirdparty.io.netty.handler.codec.protobuf.ProtobufVarin
 import org.apache.hbase.thirdparty.io.netty.handler.timeout.IdleStateEvent;
 import org.apache.hbase.thirdparty.io.netty.handler.timeout.IdleStateHandler;
 import org.apache.hbase.thirdparty.io.netty.util.concurrent.Promise;
-
-import java.io.IOException;
-import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
-import java.security.GeneralSecurityException;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-
-import javax.security.auth.callback.Callback;
-import javax.security.auth.callback.CallbackHandler;
-import javax.security.auth.callback.NameCallback;
-import javax.security.auth.callback.PasswordCallback;
-import javax.security.auth.callback.UnsupportedCallbackException;
-import javax.security.sasl.RealmCallback;
-import javax.security.sasl.RealmChoiceCallback;
-import javax.security.sasl.Sasl;
-import javax.security.sasl.SaslClient;
-import javax.security.sasl.SaslException;
-
-import org.apache.commons.codec.binary.Base64;
-import org.apache.commons.lang3.StringUtils;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.crypto.CipherOption;
-import org.apache.hadoop.crypto.CipherSuite;
-import org.apache.hadoop.crypto.CryptoCodec;
-import org.apache.hadoop.crypto.Decryptor;
-import org.apache.hadoop.crypto.Encryptor;
-import org.apache.hadoop.crypto.key.KeyProvider.KeyVersion;
-import org.apache.hadoop.fs.FileEncryptionInfo;
-import org.apache.yetus.audience.InterfaceAudience;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import com.google.protobuf.ByteString;
-import org.apache.hadoop.hdfs.DFSClient;
-import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
-import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
-import org.apache.hadoop.hdfs.protocol.datatransfer.InvalidEncryptionKeyException;
-import org.apache.hadoop.hdfs.protocol.datatransfer.TrustedChannelResolver;
-import org.apache.hadoop.hdfs.protocol.datatransfer.sasl.SaslDataTransferClient;
-import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.DataTransferEncryptorMessageProto;
-import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.DataTransferEncryptorMessageProto.DataTransferEncryptorStatus;
-import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.CipherOptionProto;
-import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
-import org.apache.hadoop.hdfs.security.token.block.DataEncryptionKey;
-import org.apache.hadoop.security.SaslPropertiesResolver;
-import org.apache.hadoop.security.SaslRpcServer.QualityOfProtection;
-import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.token.Token;
 
 /**
  * Helper class for adding sasl support for {@link FanOutOneBlockAsyncDFSOutput}.
@@ -130,16 +127,6 @@ public final class FanOutOneBlockAsyncDFSOutputSaslHelper {
   }
 
   private static final SaslAdaptor SASL_ADAPTOR;
-
-  // helper class for convert protos.
-  private interface PBHelper {
-
-    List<CipherOptionProto> convertCipherOptions(List<CipherOption> options);
-
-    List<CipherOption> convertCipherOptionProtos(List<CipherOptionProto> options);
-  }
-
-  private static final PBHelper PB_HELPER;
 
   private interface TransparentCryptoHelper {
 
@@ -191,45 +178,10 @@ public final class FanOutOneBlockAsyncDFSOutputSaslHelper {
     };
   }
 
-  private static PBHelper createPBHelper() throws NoSuchMethodException {
-    Class<?> helperClass;
-    try {
-      helperClass = Class.forName("org.apache.hadoop.hdfs.protocolPB.PBHelperClient");
-    } catch (ClassNotFoundException e) {
-      LOG.debug("No PBHelperClient class found, should be hadoop 2.7-", e);
-      helperClass = org.apache.hadoop.hdfs.protocolPB.PBHelper.class;
-    }
-    Method convertCipherOptionsMethod = helperClass.getMethod("convertCipherOptions", List.class);
-    Method convertCipherOptionProtosMethod =
-        helperClass.getMethod("convertCipherOptionProtos", List.class);
-    return new PBHelper() {
-
-      @SuppressWarnings("unchecked")
-      @Override
-      public List<CipherOptionProto> convertCipherOptions(List<CipherOption> options) {
-        try {
-          return (List<CipherOptionProto>) convertCipherOptionsMethod.invoke(null, options);
-        } catch (IllegalAccessException | InvocationTargetException e) {
-          throw new RuntimeException(e);
-        }
-      }
-
-      @SuppressWarnings("unchecked")
-      @Override
-      public List<CipherOption> convertCipherOptionProtos(List<CipherOptionProto> options) {
-        try {
-          return (List<CipherOption>) convertCipherOptionProtosMethod.invoke(null, options);
-        } catch (IllegalAccessException | InvocationTargetException e) {
-          throw new RuntimeException(e);
-        }
-      }
-    };
-  }
-
-  private static TransparentCryptoHelper createTransparentCryptoHelper()
+  private static TransparentCryptoHelper createTransparentCryptoHelperWithoutHDFS12396()
       throws NoSuchMethodException {
     Method decryptEncryptedDataEncryptionKeyMethod = DFSClient.class
-        .getDeclaredMethod("decryptEncryptedDataEncryptionKey", FileEncryptionInfo.class);
+      .getDeclaredMethod("decryptEncryptedDataEncryptionKey", FileEncryptionInfo.class);
     decryptEncryptedDataEncryptionKeyMethod.setAccessible(true);
     return new TransparentCryptoHelper() {
 
@@ -238,7 +190,7 @@ public final class FanOutOneBlockAsyncDFSOutputSaslHelper {
           DFSClient client) throws IOException {
         try {
           KeyVersion decryptedKey =
-              (KeyVersion) decryptEncryptedDataEncryptionKeyMethod.invoke(client, feInfo);
+            (KeyVersion) decryptEncryptedDataEncryptionKeyMethod.invoke(client, feInfo);
           CryptoCodec cryptoCodec = CryptoCodec.getInstance(conf, feInfo.getCipherSuite());
           Encryptor encryptor = cryptoCodec.createEncryptor();
           encryptor.init(decryptedKey.getMaterial(), feInfo.getIV());
@@ -255,10 +207,50 @@ public final class FanOutOneBlockAsyncDFSOutputSaslHelper {
     };
   }
 
+  private static TransparentCryptoHelper createTransparentCryptoHelperWithHDFS12396()
+      throws ClassNotFoundException, NoSuchMethodException {
+    Class<?> hdfsKMSUtilCls = Class.forName("org.apache.hadoop.hdfs.HdfsKMSUtil");
+    Method decryptEncryptedDataEncryptionKeyMethod = hdfsKMSUtilCls.getDeclaredMethod(
+      "decryptEncryptedDataEncryptionKey", FileEncryptionInfo.class, KeyProvider.class);
+    decryptEncryptedDataEncryptionKeyMethod.setAccessible(true);
+    return new TransparentCryptoHelper() {
+
+      @Override
+      public Encryptor createEncryptor(Configuration conf, FileEncryptionInfo feInfo,
+          DFSClient client) throws IOException {
+        try {
+          KeyVersion decryptedKey = (KeyVersion) decryptEncryptedDataEncryptionKeyMethod
+            .invoke(null, feInfo, client.getKeyProvider());
+          CryptoCodec cryptoCodec = CryptoCodec.getInstance(conf, feInfo.getCipherSuite());
+          Encryptor encryptor = cryptoCodec.createEncryptor();
+          encryptor.init(decryptedKey.getMaterial(), feInfo.getIV());
+          return encryptor;
+        } catch (InvocationTargetException e) {
+          Throwables.propagateIfPossible(e.getTargetException(), IOException.class);
+          throw new RuntimeException(e.getTargetException());
+        } catch (GeneralSecurityException e) {
+          throw new IOException(e);
+        } catch (IllegalAccessException e) {
+          throw new RuntimeException(e);
+        }
+      }
+    };
+  }
+
+  private static TransparentCryptoHelper createTransparentCryptoHelper()
+      throws NoSuchMethodException, ClassNotFoundException {
+    try {
+      return createTransparentCryptoHelperWithoutHDFS12396();
+    } catch (NoSuchMethodException e) {
+      LOG.debug("No decryptEncryptedDataEncryptionKey method in DFSClient," +
+        " should be hadoop version with HDFS-12396", e);
+    }
+    return createTransparentCryptoHelperWithHDFS12396();
+  }
+
   static {
     try {
       SASL_ADAPTOR = createSaslAdaptor();
-      PB_HELPER = createPBHelper();
       TRANSPARENT_CRYPTO_HELPER = createTransparentCryptoHelper();
     } catch (Exception e) {
       String msg = "Couldn't properly initialize access to HDFS internals. Please "
@@ -280,7 +272,7 @@ public final class FanOutOneBlockAsyncDFSOutputSaslHelper {
     /**
      * Creates a new SaslClientCallbackHandler.
      * @param userName SASL user name
-     * @Param password SASL password
+     * @param password SASL password
      */
     public SaslClientCallbackHandler(String userName, char[] password) {
       this.password = password;
@@ -371,7 +363,7 @@ public final class FanOutOneBlockAsyncDFSOutputSaslHelper {
         builder.setPayload(ByteString.copyFrom(payload));
       }
       if (options != null) {
-        builder.addAllCipherOption(PB_HELPER.convertCipherOptions(options));
+        builder.addAllCipherOption(PBHelperClient.convertCipherOptions(options));
       }
       DataTransferEncryptorMessageProto proto = builder.build();
       int size = proto.getSerializedSize();
@@ -455,7 +447,7 @@ public final class FanOutOneBlockAsyncDFSOutputSaslHelper {
     private CipherOption getCipherOption(DataTransferEncryptorMessageProto proto,
         boolean isNegotiatedQopPrivacy, SaslClient saslClient) throws IOException {
       List<CipherOption> cipherOptions =
-          PB_HELPER.convertCipherOptionProtos(proto.getCipherOptionList());
+          PBHelperClient.convertCipherOptionProtos(proto.getCipherOptionList());
       if (cipherOptions == null || cipherOptions.isEmpty()) {
         return null;
       }

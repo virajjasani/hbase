@@ -100,6 +100,9 @@ public class TestMultiRowResource {
   public static void setUpBeforeClass() throws Exception {
     conf = TEST_UTIL.getConfiguration();
     conf.setBoolean(RESTServer.REST_CSRF_ENABLED_KEY, csrfEnabled);
+    if (csrfEnabled) {
+      conf.set(RESTServer.REST_CSRF_BROWSER_USERAGENTS_REGEX_KEY, ".*");
+    }
     extraHdr = new BasicHeader(RESTServer.REST_CSRF_CUSTOM_HEADER_DEFAULT, "");
     TEST_UTIL.startMiniCluster();
     REST_TEST_UTIL.startServletContainer(conf);
@@ -244,5 +247,37 @@ public class TestMultiRowResource {
     client.delete(row_5_url, extraHdr);
   }
 
+  @Test
+  public void testMultiCellGetWithColsInQueryPathJSON() throws IOException, JAXBException {
+    String row_5_url = "/" + TABLE + "/" + ROW_1 + "/" + COLUMN_1;
+    String row_6_url = "/" + TABLE + "/" + ROW_2 + "/" + COLUMN_2;
+
+    StringBuilder path = new StringBuilder();
+    path.append("/");
+    path.append(TABLE);
+    path.append("/multiget/?row=");
+    path.append(ROW_1);
+    path.append("/");
+    path.append(COLUMN_1);
+    path.append("&row=");
+    path.append(ROW_2);
+    path.append("/");
+    path.append(COLUMN_1);
+
+    client.post(row_5_url, Constants.MIMETYPE_BINARY, Bytes.toBytes(VALUE_1), extraHdr);
+    client.post(row_6_url, Constants.MIMETYPE_BINARY, Bytes.toBytes(VALUE_2), extraHdr);
+
+    Response response = client.get(path.toString(), Constants.MIMETYPE_JSON);
+    assertEquals(200, response.getCode());
+    ObjectMapper mapper = new JacksonJaxbJsonProvider().locateMapper(
+        CellSetModel.class, MediaType.APPLICATION_JSON_TYPE);
+    CellSetModel cellSet = mapper.readValue(response.getBody(), CellSetModel.class);
+    assertEquals(1, cellSet.getRows().size());
+    assertEquals(ROW_1, Bytes.toString(cellSet.getRows().get(0).getKey()));
+    assertEquals(VALUE_1, Bytes.toString(cellSet.getRows().get(0).getCells().get(0).getValue()));
+
+    client.delete(row_5_url, extraHdr);
+    client.delete(row_6_url, extraHdr);
+  }
 }
 

@@ -26,6 +26,7 @@ import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.NoTagsByteBufferKeyValue;
 import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.SizeCachedKeyValue;
 import org.apache.hadoop.hbase.SizeCachedNoTagsKeyValue;
@@ -126,10 +127,10 @@ public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
   private int binarySearch(Cell seekCell, boolean seekBefore) {
     int low = 0;
     int high = rowNumber - 1;
-    int mid = (low + high) >>> 1;
+    int mid = low + ((high - low) >> 1);
     int comp = 0;
     while (low <= high) {
-      mid = (low + high) >>> 1;
+      mid = low + ((high - low) >> 1);
       ByteBuffer row = getRow(mid);
       comp = compareRows(row, seekCell);
       if (comp < 0) {
@@ -356,7 +357,7 @@ public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
 
     protected int getCellBufSize() {
       int kvBufSize = KEY_VALUE_LEN_SIZE + keyLength + valueLength;
-      if (includesTags()) {
+      if (includesTags() && tagsLength > 0) {
         kvBufSize += Bytes.SIZEOF_SHORT + tagsLength;
       }
       return kvBufSize;
@@ -383,7 +384,9 @@ public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
         currentBuffer.asSubByteBuffer(startOffset, cellBufSize, tmpPair);
         ByteBuffer buf = tmpPair.getFirst();
         if (buf.isDirect()) {
-          ret = new ByteBufferKeyValue(buf, tmpPair.getSecond(), cellBufSize, seqId);
+          ret =
+              tagsLength > 0 ? new ByteBufferKeyValue(buf, tmpPair.getSecond(), cellBufSize, seqId)
+                  : new NoTagsByteBufferKeyValue(buf, tmpPair.getSecond(), cellBufSize, seqId);
         } else {
           if (tagsLength > 0) {
             ret = new SizeCachedKeyValue(buf.array(), buf.arrayOffset()

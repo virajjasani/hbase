@@ -61,7 +61,7 @@ public class StoreUtils {
   public static long getLowestTimestamp(Collection<HStoreFile> candidates) throws IOException {
     long minTs = Long.MAX_VALUE;
     for (HStoreFile storeFile : candidates) {
-      minTs = Math.min(minTs, storeFile.getModificationTimeStamp());
+      minTs = Math.min(minTs, storeFile.getModificationTimestamp());
     }
     return minTs;
   }
@@ -120,7 +120,7 @@ public class StoreUtils {
     if (comparator.compareRows(midKey, firstKey) == 0 ||
         comparator.compareRows(midKey, lastKey) == 0) {
       if (LOG.isDebugEnabled()) {
-        LOG.debug("cannot split because midkey is the same as first or last row");
+        LOG.debug("cannot split {} because midkey is the same as first or last row", file);
       }
       return Optional.empty();
     }

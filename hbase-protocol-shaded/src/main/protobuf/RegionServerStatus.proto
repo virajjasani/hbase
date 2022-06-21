@@ -28,6 +28,7 @@ option optimize_for = SPEED;
 
 import "HBase.proto";
 import "ClusterStatus.proto";
+import "ErrorHandling.proto";
 
 message RegionServerStartupRequest {
   /** Port number this regionserver is up on */
@@ -95,6 +96,7 @@ message RegionStateTransition {
   /** For newly opened region, the open seq num is needed */
   optional uint64 open_seq_num = 3;
 
+  repeated int64 proc_id = 4;
   enum TransitionCode {
     OPENED = 0;
     FAILED_OPEN = 1;
@@ -143,7 +145,22 @@ message RegionSpaceUseReportRequest {
 }
 
 message RegionSpaceUseReportResponse {
+}
 
+message RemoteProcedureResult {
+  required uint64 proc_id = 1;
+  enum Status {
+    SUCCESS = 1;
+    ERROR = 2;
+  }
+  required Status status = 2;
+  optional ForeignExceptionMessage error = 3;
+}
+message ReportProcedureDoneRequest {
+  repeated RemoteProcedureResult result = 1;
+}
+
+message ReportProcedureDoneResponse {
 }
 
 service RegionServerStatusService {
@@ -181,4 +198,7 @@ service RegionServerStatusService {
    */
   rpc ReportRegionSpaceUse(RegionSpaceUseReportRequest)
     returns(RegionSpaceUseReportResponse);
+
+  rpc ReportProcedureDone(ReportProcedureDoneRequest)
+    returns(ReportProcedureDoneResponse);
 }

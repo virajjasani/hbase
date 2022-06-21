@@ -47,7 +47,10 @@ import junit.framework.TestCase;
 /**
  * Abstract HBase test class.  Initializes a few things that can come in handly
  * like an HBaseConfiguration and filesystem.
- * @deprecated Write junit4 unit tests using {@link HBaseTestingUtility}
+ * @deprecated since 2.0.0 and will be removed in 3.0.0. Write junit4 unit tests using
+ *   {@link HBaseTestingUtility}.
+ * @see HBaseTestingUtility
+ * @see <a href="https://issues.apache.org/jira/browse/HBASE-11912">HBASE-11912</a>
  */
 @Deprecated
 public abstract class HBaseTestCase extends TestCase {
@@ -363,31 +366,30 @@ public abstract class HBaseTestCase extends TestCase {
 
   protected void assertResultEquals(final HRegion region, final byte [] row,
       final byte [] family, final byte [] qualifier, final long timestamp,
-      final byte [] value)
-    throws IOException {
-      Get get = new Get(row);
-      get.setTimeStamp(timestamp);
-      Result res = region.get(get);
-      NavigableMap<byte[], NavigableMap<byte[], NavigableMap<Long, byte[]>>> map =
-        res.getMap();
-      byte [] res_value = map.get(family).get(qualifier).get(timestamp);
+      final byte [] value) throws IOException {
+    Get get = new Get(row);
+    get.setTimestamp(timestamp);
+    Result res = region.get(get);
+    NavigableMap<byte[], NavigableMap<byte[], NavigableMap<Long, byte[]>>> map =
+      res.getMap();
+    byte [] res_value = map.get(family).get(qualifier).get(timestamp);
 
-      if (value == null) {
+    if (value == null) {
+      assertEquals(Bytes.toString(family) + " " + Bytes.toString(qualifier) +
+          " at timestamp " + timestamp, null, res_value);
+    } else {
+      if (res_value == null) {
+        fail(Bytes.toString(family) + " " + Bytes.toString(qualifier) +
+            " at timestamp " + timestamp + "\" was expected to be \"" +
+            Bytes.toStringBinary(value) + " but was null");
+      }
+      if (res_value != null) {
         assertEquals(Bytes.toString(family) + " " + Bytes.toString(qualifier) +
-            " at timestamp " + timestamp, null, res_value);
-      } else {
-        if (res_value == null) {
-          fail(Bytes.toString(family) + " " + Bytes.toString(qualifier) +
-              " at timestamp " + timestamp + "\" was expected to be \"" +
-              Bytes.toStringBinary(value) + " but was null");
-        }
-        if (res_value != null) {
-          assertEquals(Bytes.toString(family) + " " + Bytes.toString(qualifier) +
-              " at timestamp " +
-              timestamp, value, new String(res_value, StandardCharsets.UTF_8));
-        }
+            " at timestamp " +
+            timestamp, value, new String(res_value, StandardCharsets.UTF_8));
       }
     }
+  }
 
   /**
    * Common method to close down a MiniDFSCluster and the associated file system

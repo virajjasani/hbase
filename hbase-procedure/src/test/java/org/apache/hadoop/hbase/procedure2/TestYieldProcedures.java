@@ -42,7 +42,6 @@ import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestYieldProcedures {
-
   @ClassRule
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestYieldProcedures.class);
@@ -71,10 +70,10 @@ public class TestYieldProcedures {
     logDir = new Path(testDir, "proc-logs");
     procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), logDir);
     procRunnables = new TestScheduler();
-    procExecutor = new ProcedureExecutor(htu.getConfiguration(), new TestProcEnv(),
-        procStore, procRunnables);
+    procExecutor =
+      new ProcedureExecutor<>(htu.getConfiguration(), new TestProcEnv(), procStore, procRunnables);
     procStore.start(PROCEDURE_EXECUTOR_SLOTS);
-    procExecutor.start(PROCEDURE_EXECUTOR_SLOTS, true);
+    ProcedureTestingUtility.initAndStartWorkers(procExecutor, PROCEDURE_EXECUTOR_SLOTS, true);
   }
 
   @After
@@ -117,9 +116,9 @@ public class TestYieldProcedures {
     // check runnable queue stats
     assertEquals(0, procRunnables.size());
     assertEquals(0, procRunnables.addFrontCalls);
-    assertEquals(18, procRunnables.addBackCalls);
-    assertEquals(15, procRunnables.yieldCalls);
-    assertEquals(19, procRunnables.pollCalls);
+    assertEquals(15, procRunnables.addBackCalls);
+    assertEquals(12, procRunnables.yieldCalls);
+    assertEquals(16, procRunnables.pollCalls);
     assertEquals(3, procRunnables.completionCalls);
   }
 
@@ -157,9 +156,9 @@ public class TestYieldProcedures {
     // check runnable queue stats
     assertEquals(0, procRunnables.size());
     assertEquals(0, procRunnables.addFrontCalls);
-    assertEquals(12, procRunnables.addBackCalls);
-    assertEquals(11, procRunnables.yieldCalls);
-    assertEquals(13, procRunnables.pollCalls);
+    assertEquals(11, procRunnables.addBackCalls);
+    assertEquals(10, procRunnables.yieldCalls);
+    assertEquals(12, procRunnables.pollCalls);
     assertEquals(1, procRunnables.completionCalls);
   }
 
@@ -201,9 +200,17 @@ public class TestYieldProcedures {
         this.rollback = isRollback;
       }
 
-      public State getStep() { return step; }
-      public long getTimestamp() { return timestamp; }
-      public boolean isRollback() { return rollback; }
+      public State getStep() {
+        return step;
+      }
+
+      public long getTimestamp() {
+        return timestamp;
+      }
+
+      public boolean isRollback() {
+        return rollback;
+      }
     }
 
     private final ArrayList<ExecutionInfo> executionInfo = new ArrayList<>();

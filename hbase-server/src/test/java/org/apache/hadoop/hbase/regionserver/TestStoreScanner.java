@@ -31,15 +31,16 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.NavigableSet;
-import java.util.OptionalInt;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.KeyValue;
@@ -74,15 +75,15 @@ public class TestStoreScanner {
   private static final String CF_STR = "cf";
   private static final byte[] CF = Bytes.toBytes(CF_STR);
   static Configuration CONF = HBaseConfiguration.create();
+  private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private ScanInfo scanInfo = new ScanInfo(CONF, CF, 0, Integer.MAX_VALUE, Long.MAX_VALUE,
       KeepDeletedCells.FALSE, HConstants.DEFAULT_BLOCKSIZE, 0, CellComparator.getInstance(), false);
 
   /**
    * From here on down, we have a bunch of defines and specific CELL_GRID of Cells. The
    * CELL_GRID then has a Scanner that can fake out 'block' transitions. All this elaborate
-   * setup is for tests that ensure we don't overread, and that the
-   * {@link StoreScanner#optimize(org.apache.hadoop.hbase.regionserver.querymatcher.ScanQueryMatcher.MatchCode,
-   * Cell)} is not overly enthusiastic.
+   * setup is for tests that ensure we don't overread, and that the {@link StoreScanner} is not
+   * overly enthusiastic.
    */
   private static final byte[] ZERO = new byte[] {'0'};
   private static final byte[] ZERO_POINT_ZERO = new byte[] {'0', '.', '0'};
@@ -170,7 +171,13 @@ public class TestStoreScanner {
       if (count == null) {
         count = new AtomicInteger(0);
       }
-      heap = new KeyValueHeapWithCount(scanners, comparator, count);
+      heap = newKVHeap(scanners, comparator);
+    }
+
+    @Override
+    protected KeyValueHeap newKVHeap(List<? extends KeyValueScanner> scanners,
+        CellComparator comparator) throws IOException {
+      return new KeyValueHeapWithCount(scanners, comparator, count);
     }
 
     @Override
@@ -841,7 +848,6 @@ public class TestStoreScanner {
     }
   }
 
-
   @Test @Ignore("this fails, since we don't handle deletions, etc, in peek")
   public void testPeek() throws Exception {
     KeyValue[] kvs = new KeyValue [] {
@@ -937,7 +943,7 @@ public class TestStoreScanner {
         200, /* timeToPurgeDeletes */
         CellComparator.getInstance(), false);
       try (StoreScanner scanner =
-          new StoreScanner(scanInfo, OptionalInt.of(2), ScanType.COMPACT_DROP_DELETES, scanners)) {
+          new StoreScanner(scanInfo, 2, ScanType.COMPACT_DROP_DELETES, scanners)) {
         List<Cell> results = new ArrayList<>();
         results = new ArrayList<>();
         assertEquals(true, scanner.next(results));
@@ -965,8 +971,8 @@ public class TestStoreScanner {
     List<KeyValueScanner> scanners = scanFixture(kvs);
     ScanInfo scanInfo = new ScanInfo(CONF, CF, 0, 1, 500, KeepDeletedCells.FALSE,
         HConstants.DEFAULT_BLOCKSIZE, 0, CellComparator.getInstance(), false);
-    try (StoreScanner storeScanner = new StoreScanner(scanInfo, OptionalInt.empty(),
-        ScanType.COMPACT_RETAIN_DELETES, scanners)) {
+    try (StoreScanner storeScanner = new StoreScanner(scanInfo, -1,
+      ScanType.COMPACT_RETAIN_DELETES, scanners)) {
       assertFalse(storeScanner.isScanUsePread());
     }
   }

@@ -44,6 +44,7 @@ import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -67,6 +68,7 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.MemoryCompactionPolicy;
+import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
@@ -203,7 +205,7 @@ public class TestHStore {
 
   private void initHRegion(String methodName, Configuration conf, TableDescriptorBuilder builder,
       ColumnFamilyDescriptor hcd, MyStoreHook hook, boolean switchToPread) throws IOException {
-    TableDescriptor htd = builder.addColumnFamily(hcd).build();
+    TableDescriptor htd = builder.setColumnFamily(hcd).build();
     Path basedir = new Path(DIR + methodName);
     Path tableDir = FSUtils.getTableDir(basedir, htd.getTableName());
     final Path logdir = new Path(basedir, AbstractFSWALProvider.getWALDirectoryName(methodName));
@@ -219,13 +221,16 @@ public class TestHStore {
     WALFactory wals = new WALFactory(walConf, methodName);
     region = new HRegion(new HRegionFileSystem(conf, fs, tableDir, info), wals.getWAL(info), conf,
         htd, null);
+    region.regionServicesForStores = Mockito.spy(region.regionServicesForStores);
+    ThreadPoolExecutor pool = (ThreadPoolExecutor) Executors.newFixedThreadPool(1);
+    Mockito.when(region.regionServicesForStores.getInMemoryCompactionPool()).thenReturn(pool);
   }
 
   private HStore init(String methodName, Configuration conf, TableDescriptorBuilder builder,
       ColumnFamilyDescriptor hcd, MyStoreHook hook, boolean switchToPread) throws IOException {
     initHRegion(methodName, conf, builder, hcd, hook, switchToPread);
     if (hook == null) {
-      store = new HStore(region, hcd, conf);
+      store = new HStore(region, hcd, conf, false);
     } else {
       store = new MyStore(region, hcd, conf, hook, switchToPread);
     }
@@ -239,8 +244,7 @@ public class TestHStore {
    */
   @Test
   public void testFlushSizeSizing() throws Exception {
-    LOG.info("Setting up a faulty file system that cannot write in " +
-      this.name.getMethodName());
+    LOG.info("Setting up a faulty file system that cannot write in " + this.name.getMethodName());
     final Configuration conf = HBaseConfiguration.create(TEST_UTIL.getConfiguration());
     // Only retry once.
     conf.setInt("hbase.hstore.flush.retries.number", 1);
@@ -259,15 +263,15 @@ public class TestHStore {
         // Initialize region
         init(name.getMethodName(), conf);
 
-        MemStoreSize size = store.memstore.getFlushableSize();
-        assertEquals(0, size.getDataSize());
+        MemStoreSize mss = store.memstore.getFlushableSize();
+        assertEquals(0, mss.getDataSize());
         LOG.info("Adding some data");
-        MemStoreSizing kvSize = new MemStoreSizing();
+        MemStoreSizing kvSize = new NonThreadSafeMemStoreSizing();
         store.add(new KeyValue(row, family, qf1, 1, (byte[]) null), kvSize);
         // add the heap size of active (mutable) segment
-        kvSize.incMemStoreSize(0, MutableSegment.DEEP_OVERHEAD);
-        size = store.memstore.getFlushableSize();
-        assertEquals(kvSize, size);
+        kvSize.incMemStoreSize(0, MutableSegment.DEEP_OVERHEAD, 0, 0);
+        mss = store.memstore.getFlushableSize();
+        assertEquals(kvSize.getMemStoreSize(), mss);
         // Flush.  Bug #1 from HBASE-10466.  Make sure size calculation on failed flush is right.
         try {
           LOG.info("Flushing");
@@ -278,24 +282,24 @@ public class TestHStore {
         }
         // due to snapshot, change mutable to immutable segment
         kvSize.incMemStoreSize(0,
-            CSLMImmutableSegment.DEEP_OVERHEAD_CSLM-MutableSegment.DEEP_OVERHEAD);
-        size = store.memstore.getFlushableSize();
-        assertEquals(kvSize, size);
-        MemStoreSizing kvSize2 = new MemStoreSizing();
-        store.add(new KeyValue(row, family, qf2, 2, (byte[])null), kvSize2);
-        kvSize2.incMemStoreSize(0, MutableSegment.DEEP_OVERHEAD);
+          CSLMImmutableSegment.DEEP_OVERHEAD_CSLM - MutableSegment.DEEP_OVERHEAD, 0, 0);
+        mss = store.memstore.getFlushableSize();
+        assertEquals(kvSize.getMemStoreSize(), mss);
+        MemStoreSizing kvSize2 = new NonThreadSafeMemStoreSizing();
+        store.add(new KeyValue(row, family, qf2, 2, (byte[]) null), kvSize2);
+        kvSize2.incMemStoreSize(0, MutableSegment.DEEP_OVERHEAD, 0, 0);
         // Even though we add a new kv, we expect the flushable size to be 'same' since we have
         // not yet cleared the snapshot -- the above flush failed.
-        assertEquals(kvSize, size);
+        assertEquals(kvSize.getMemStoreSize(), mss);
         ffs.fault.set(false);
         flushStore(store, id++);
-        size = store.memstore.getFlushableSize();
+        mss = store.memstore.getFlushableSize();
         // Size should be the foreground kv size.
-        assertEquals(kvSize2, size);
+        assertEquals(kvSize2.getMemStoreSize(), mss);
         flushStore(store, id++);
-        size = store.memstore.getFlushableSize();
-        assertEquals(0, size.getDataSize());
-        assertEquals(MutableSegment.DEEP_OVERHEAD, size.getHeapSize());
+        mss = store.memstore.getFlushableSize();
+        assertEquals(0, mss.getDataSize());
+        assertEquals(MutableSegment.DEEP_OVERHEAD, mss.getHeapSize());
         return null;
       }
     });
@@ -491,7 +495,8 @@ public class TestHStore {
     w.close();
     this.store.close();
     // Reopen it... should pick up two files
-    this.store = new HStore(this.store.getHRegion(), this.store.getColumnFamilyDescriptor(), c);
+    this.store =
+        new HStore(this.store.getHRegion(), this.store.getColumnFamilyDescriptor(), c, false);
     assertEquals(2, this.store.getStorefilesCount());
 
     result = HBaseTestingUtility.getFromStoreFile(store,
@@ -789,7 +794,7 @@ public class TestHStore {
    * @param numRows
    * @param qualifier
    * @param family
-   * @return
+   * @return the rows key-value list
    */
   List<Cell> getKeyValueSet(long[] timestamps, int numRows,
       byte[] qualifier, byte[] family) {
@@ -1225,7 +1230,7 @@ public class TestHStore {
     byte[] value0 = Bytes.toBytes("value0");
     byte[] value1 = Bytes.toBytes("value1");
     byte[] value2 = Bytes.toBytes("value2");
-    MemStoreSizing memStoreSizing = new MemStoreSizing();
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     long ts = EnvironmentEdgeManager.currentTime();
     long seqId = 100;
     init(name.getMethodName(), conf, TableDescriptorBuilder.newBuilder(TableName.valueOf(table)),
@@ -1284,7 +1289,7 @@ public class TestHStore {
     init(name.getMethodName(), conf, ColumnFamilyDescriptorBuilder.newBuilder(family)
         .setInMemoryCompaction(MemoryCompactionPolicy.BASIC).build());
     byte[] value = Bytes.toBytes("value");
-    MemStoreSizing memStoreSizing = new MemStoreSizing();
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     long ts = EnvironmentEdgeManager.currentTime();
     long seqId = 100;
     // older data whihc shouldn't be "seen" by client
@@ -1362,7 +1367,7 @@ public class TestHStore {
     });
     byte[] oldValue = Bytes.toBytes("oldValue");
     byte[] currentValue = Bytes.toBytes("currentValue");
-    MemStoreSizing memStoreSizing = new MemStoreSizing();
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     long ts = EnvironmentEdgeManager.currentTime();
     long seqId = 100;
     // older data whihc shouldn't be "seen" by client
@@ -1478,7 +1483,7 @@ public class TestHStore {
     init(name.getMethodName(), conf, ColumnFamilyDescriptorBuilder.newBuilder(family)
         .setInMemoryCompaction(MemoryCompactionPolicy.BASIC).build());
     byte[] value = Bytes.toBytes("thisisavarylargevalue");
-    MemStoreSizing memStoreSizing = new MemStoreSizing();
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     long ts = EnvironmentEdgeManager.currentTime();
     long seqId = 100;
     // older data whihc shouldn't be "seen" by client
@@ -1521,7 +1526,7 @@ public class TestHStore {
     ColumnFamilyDescriptor hcd = ColumnFamilyDescriptorBuilder.of(family);
     initHRegion(name.getMethodName(), conf,
       TableDescriptorBuilder.newBuilder(TableName.valueOf(table)), hcd, null, false);
-    HStore store = new HStore(region, hcd, conf) {
+    HStore store = new HStore(region, hcd, conf, false) {
 
       @Override
       protected StoreEngine<?, ?, ?, ?> createStoreEngine(HStore store, Configuration conf,
@@ -1563,7 +1568,7 @@ public class TestHStore {
 
     MyStore(final HRegion region, final ColumnFamilyDescriptor family, final Configuration
         confParam, MyStoreHook hook, boolean switchToPread) throws IOException {
-      super(region, family, confParam);
+      super(region, family, confParam, false);
       this.hook = hook;
     }
 
@@ -1600,7 +1605,7 @@ public class TestHStore {
     conf.setLong(StoreScanner.STORESCANNER_PREAD_MAX_BYTES, 0);
     // Set the lower threshold to invoke the "MERGE" policy
     MyStore store = initMyStore(name.getMethodName(), conf, new MyStoreHook() {});
-    MemStoreSizing memStoreSizing = new MemStoreSizing();
+    MemStoreSizing memStoreSizing = new NonThreadSafeMemStoreSizing();
     long ts = System.currentTimeMillis();
     long seqID = 1L;
     // Add some data to the region and do some flushes
@@ -1658,6 +1663,19 @@ public class TestHStore {
     assertFalse(heap.equals(heap2));
   }
 
+  @Test
+  public void testInMemoryCompactionTypeWithLowerCase() throws IOException, InterruptedException {
+    Configuration conf = HBaseConfiguration.create();
+    conf.set("hbase.systemtables.compacting.memstore.type", "eager");
+    init(name.getMethodName(), conf,
+      TableDescriptorBuilder.newBuilder(
+        TableName.valueOf(NamespaceDescriptor.SYSTEM_NAMESPACE_NAME, "meta".getBytes())),
+      ColumnFamilyDescriptorBuilder.newBuilder(family)
+        .setInMemoryCompaction(MemoryCompactionPolicy.NONE).build());
+    assertTrue(((MemStoreCompactor) ((CompactingMemStore) store.memstore).compactor).toString()
+      .startsWith("eager".toUpperCase()));
+  }
+
   private static class MyThread extends Thread {
     private StoreScanner scanner;
     private KeyValueHeap heap;
@@ -1688,15 +1706,15 @@ public class TestHStore {
     @Override
     public boolean start() throws IOException {
       boolean isFirst = RUNNER_COUNT.getAndIncrement() == 0;
-      boolean rval = super.start();
       if (isFirst) {
         try {
           START_COMPACTOR_LATCH.await();
+          return super.start();
         } catch (InterruptedException ex) {
           throw new RuntimeException(ex);
         }
       }
-      return rval;
+      return super.start();
     }
   }
 
@@ -1715,8 +1733,8 @@ public class TestHStore {
     }
 
     @Override
-    protected boolean shouldFlushInMemory() {
-      boolean rval = super.shouldFlushInMemory();
+    protected boolean setInMemoryCompactionFlag() {
+      boolean rval = super.setInMemoryCompactionFlag();
       if (rval) {
         RUNNER_COUNT.incrementAndGet();
         if (LOG.isDebugEnabled()) {

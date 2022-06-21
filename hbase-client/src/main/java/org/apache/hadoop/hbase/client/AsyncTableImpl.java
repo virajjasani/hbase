@@ -20,17 +20,17 @@ package org.apache.hadoop.hbase.client;
 import static java.util.stream.Collectors.toList;
 
 import com.google.protobuf.RpcChannel;
-
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.io.TimeRange;
+import org.apache.hadoop.hbase.util.FutureUtils;
 import org.apache.yetus.audience.InterfaceAudience;
 
 /**
@@ -88,15 +88,7 @@ class AsyncTableImpl implements AsyncTable<ScanResultConsumer> {
   }
 
   private <T> CompletableFuture<T> wrap(CompletableFuture<T> future) {
-    CompletableFuture<T> asyncFuture = new CompletableFuture<>();
-    future.whenCompleteAsync((r, e) -> {
-      if (e != null) {
-        asyncFuture.completeExceptionally(e);
-      } else {
-        asyncFuture.complete(r);
-      }
-    }, pool);
-    return asyncFuture;
+    return FutureUtils.wrapFuture(future, pool);
   }
 
   @Override
@@ -148,6 +140,12 @@ class AsyncTableImpl implements AsyncTable<ScanResultConsumer> {
       @Override
       public CheckAndMutateBuilder qualifier(byte[] qualifier) {
         builder.qualifier(qualifier);
+        return this;
+      }
+
+      @Override
+      public CheckAndMutateBuilder timeRange(TimeRange timeRange) {
+        builder.timeRange(timeRange);
         return this;
       }
 

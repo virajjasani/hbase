@@ -23,6 +23,7 @@ import static org.apache.hadoop.hbase.util.Bytes.len;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Objects;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
@@ -208,20 +209,23 @@ public class ColumnRangeFilter extends FilterBase {
   }
 
   /**
-   * @param other
-   * @return true if and only if the fields of the filter that are serialized
-   * are equal to the corresponding fields in other.  Used for testing.
+   * @param o filter to serialize.
+   * @return true if and only if the fields of the filter that are serialized are equal to the
+   *         corresponding fields in other. Used for testing.
    */
   @Override
   boolean areSerializedFieldsEqual(Filter o) {
-   if (o == this) return true;
-   if (!(o instanceof ColumnRangeFilter)) return false;
-
-   ColumnRangeFilter other = (ColumnRangeFilter)o;
-   return Bytes.equals(this.getMinColumn(),other.getMinColumn())
-     && this.getMinColumnInclusive() == other.getMinColumnInclusive()
-     && Bytes.equals(this.getMaxColumn(), other.getMaxColumn())
-     && this.getMaxColumnInclusive() == other.getMaxColumnInclusive();
+    if (o == this) {
+      return true;
+    }
+    if (!(o instanceof ColumnRangeFilter)) {
+      return false;
+    }
+    ColumnRangeFilter other = (ColumnRangeFilter) o;
+    return Bytes.equals(this.getMinColumn(), other.getMinColumn())
+        && this.getMinColumnInclusive() == other.getMinColumnInclusive()
+        && Bytes.equals(this.getMaxColumn(), other.getMaxColumn())
+        && this.getMaxColumnInclusive() == other.getMaxColumnInclusive();
   }
 
   @Override
@@ -235,5 +239,16 @@ public class ColumnRangeFilter extends FilterBase {
         + (this.minColumnInclusive ? "[" : "(") + Bytes.toStringBinary(this.minColumn)
         + ", " + Bytes.toStringBinary(this.maxColumn)
         + (this.maxColumnInclusive ? "]" : ")");
+  }
+
+  @Override
+  public boolean equals(Object obj) {
+    return obj instanceof Filter && areSerializedFieldsEqual((Filter) obj);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(Bytes.hashCode(getMinColumn()), getMinColumnInclusive(),
+      Bytes.hashCode(getMaxColumn()), getMaxColumnInclusive());
   }
 }

@@ -16,8 +16,11 @@
 package org.apache.hadoop.hbase.client;
 
 import static org.apache.hadoop.hbase.client.BufferedMutatorParams.UNSET;
+
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -141,7 +144,13 @@ public class BufferedMutatorImpl implements BufferedMutator {
       RpcControllerFactory rpcFactory, BufferedMutatorParams params) {
     this(conn, params,
       // puts need to track errors globally due to how the APIs currently work.
-      new AsyncProcess(conn, conn.getConfiguration(), rpcCallerFactory, true, rpcFactory));
+      new AsyncProcess(conn, conn.getConfiguration(), rpcCallerFactory, rpcFactory));
+  }
+
+  private void checkClose() {
+    if (closed) {
+      throw new IllegalStateException("Cannot put when the BufferedMutator is closed.");
+    }
   }
 
   @VisibleForTesting
@@ -173,16 +182,13 @@ public class BufferedMutatorImpl implements BufferedMutator {
   @Override
   public void mutate(List<? extends Mutation> ms) throws InterruptedIOException,
       RetriesExhaustedWithDetailsException {
-
-    if (closed) {
-      throw new IllegalStateException("Cannot put when the BufferedMutator is closed.");
-    }
+    checkClose();
 
     long toAddSize = 0;
     int toAddCount = 0;
     for (Mutation m : ms) {
       if (m instanceof Put) {
-        validatePut((Put) m);
+        ConnectionUtils.validatePut((Put) m, maxKeyValueSize);
       }
       toAddSize += m.heapSize();
       ++toAddCount;
@@ -191,26 +197,10 @@ public class BufferedMutatorImpl implements BufferedMutator {
     if (currentWriteBufferSize.get() == 0) {
       firstRecordInBufferTimestamp.set(System.currentTimeMillis());
     }
-
-    // This behavior is highly non-intuitive... it does not protect us against
-    // 94-incompatible behavior, which is a timing issue because hasError, the below code
-    // and setter of hasError are not synchronized. Perhaps it should be removed.
-    if (ap.hasError()) {
-      currentWriteBufferSize.addAndGet(toAddSize);
-      writeAsyncBuffer.addAll(ms);
-      undealtMutationCount.addAndGet(toAddCount);
-      backgroundFlushCommits(true);
-    } else {
-      currentWriteBufferSize.addAndGet(toAddSize);
-      writeAsyncBuffer.addAll(ms);
-      undealtMutationCount.addAndGet(toAddCount);
-    }
-
-    // Now try and queue what needs to be queued.
-    while (undealtMutationCount.get() != 0
-        && currentWriteBufferSize.get() > writeBufferSize) {
-      backgroundFlushCommits(false);
-    }
+    currentWriteBufferSize.addAndGet(toAddSize);
+    writeAsyncBuffer.addAll(ms);
+    undealtMutationCount.addAndGet(toAddCount);
+    doFlush(false);
   }
 
   @VisibleForTesting
@@ -238,118 +228,40 @@ public class BufferedMutatorImpl implements BufferedMutator {
     }
   }
 
-  // validate for well-formedness
-  public void validatePut(final Put put) throws IllegalArgumentException {
-    HTable.validatePut(put, maxKeyValueSize);
-  }
-
   @Override
   public synchronized void close() throws IOException {
-    try {
-      if (this.closed) {
-        return;
-      }
-
-      // Stop any running Periodic Flush timer.
-      disableWriteBufferPeriodicFlush();
-
-      // As we can have an operation in progress even if the buffer is empty, we call
-      // backgroundFlushCommits at least one time.
-      backgroundFlushCommits(true);
-      if (cleanupPoolOnClose) {
-        this.pool.shutdown();
-        boolean terminated;
-        int loopCnt = 0;
-        do {
-          // wait until the pool has terminated
-          terminated = this.pool.awaitTermination(60, TimeUnit.SECONDS);
-          loopCnt += 1;
-          if (loopCnt >= 10) {
-            LOG.warn("close() failed to terminate pool after 10 minutes. Abandoning pool.");
-            break;
-          }
-        } while (!terminated);
-      }
-    } catch (InterruptedException e) {
-      LOG.warn("waitForTermination interrupted");
-    } finally {
-      this.closed = true;
-    }
-  }
-
-  @Override
-  public synchronized void flush() throws InterruptedIOException,
-      RetriesExhaustedWithDetailsException {
-    // As we can have an operation in progress even if the buffer is empty, we call
-    // backgroundFlushCommits at least one time.
-    backgroundFlushCommits(true);
-  }
-
-  /**
-   * Send the operations in the buffer to the servers. Does not wait for the server's answer. If
-   * the is an error (max retried reach from a previous flush or bad operation), it tries to send
-   * all operations in the buffer and sends an exception.
-   *
-   * @param synchronous - if true, sends all the writes and wait for all of them to finish before
-   *        returning.
-   */
-  private void backgroundFlushCommits(boolean synchronous) throws
-      InterruptedIOException,
-      RetriesExhaustedWithDetailsException {
-    if (!synchronous && writeAsyncBuffer.isEmpty()) {
+    if (closed) {
       return;
     }
-
-    if (!synchronous) {
-      QueueRowAccess taker = new QueueRowAccess();
-      AsyncProcessTask task = wrapAsyncProcessTask(taker);
-      try {
-        ap.submit(task);
-        if (ap.hasError()) {
-          LOG.debug(tableName + ": One or more of the operations have failed -"
-              + " waiting for all operation in progress to finish (successfully or not)");
-        }
-      } finally {
-        taker.restoreRemainder();
-      }
-    }
-    if (synchronous || ap.hasError()) {
-      QueueRowAccess taker = new QueueRowAccess();
-      AsyncProcessTask task = wrapAsyncProcessTask(taker);
-      try {
-        while (!taker.isEmpty()) {
-          ap.submit(task);
-          taker.reset();
-        }
-      } finally {
-        taker.restoreRemainder();
-      }
-      RetriesExhaustedWithDetailsException error =
-          ap.waitForAllPreviousOpsAndReset(null, tableName);
-      if (error != null) {
-        if (listener == null) {
-          throw error;
-        } else {
-          this.listener.onException(error, this);
+    // Stop any running Periodic Flush timer.
+    disableWriteBufferPeriodicFlush();
+    try {
+      // As we can have an operation in progress even if the buffer is empty, we call
+      // doFlush at least one time.
+      doFlush(true);
+    } finally {
+      if (cleanupPoolOnClose) {
+        this.pool.shutdown();
+        try {
+          if (!pool.awaitTermination(600, TimeUnit.SECONDS)) {
+            LOG.warn("close() failed to terminate pool after 10 minutes. Abandoning pool.");
+          }
+        } catch (InterruptedException e) {
+          LOG.warn("waitForTermination interrupted");
+          Thread.currentThread().interrupt();
         }
       }
+      closed = true;
     }
   }
 
-  /**
-   * Reuse the AsyncProcessTask when calling
-   * {@link BufferedMutatorImpl#backgroundFlushCommits(boolean)}.
-   * @param taker access the inner buffer.
-   * @return An AsyncProcessTask which always returns the latest rpc and operation timeout.
-   */
-  private AsyncProcessTask wrapAsyncProcessTask(QueueRowAccess taker) {
-    AsyncProcessTask task = AsyncProcessTask.newBuilder()
+  private AsyncProcessTask createTask(QueueRowAccess access) {
+    return new AsyncProcessTask(AsyncProcessTask.newBuilder()
         .setPool(pool)
         .setTableName(tableName)
-        .setRowAccess(taker)
+        .setRowAccess(access)
         .setSubmittedRows(AsyncProcessTask.SubmittedRows.AT_LEAST_ONE)
-        .build();
-    return new AsyncProcessTask(task) {
+        .build()) {
       @Override
       public int getRpcTimeout() {
         return rpcTimeout.get();
@@ -360,6 +272,72 @@ public class BufferedMutatorImpl implements BufferedMutator {
         return operationTimeout.get();
       }
     };
+  }
+
+  @Override
+  public void flush() throws InterruptedIOException, RetriesExhaustedWithDetailsException {
+    checkClose();
+    doFlush(true);
+  }
+
+  /**
+   * Send the operations in the buffer to the servers.
+   *
+   * @param flushAll - if true, sends all the writes and wait for all of them to finish before
+   *                 returning. Otherwise, flush until buffer size is smaller than threshold
+   */
+  private void doFlush(boolean flushAll) throws InterruptedIOException,
+      RetriesExhaustedWithDetailsException {
+    List<RetriesExhaustedWithDetailsException> errors = new ArrayList<>();
+    while (true) {
+      if (!flushAll && currentWriteBufferSize.get() <= writeBufferSize) {
+        // There is the room to accept more mutations.
+        break;
+      }
+      AsyncRequestFuture asf;
+      try (QueueRowAccess access = createQueueRowAccess()) {
+        if (access.isEmpty()) {
+          // It means someone has gotten the ticker to run the flush.
+          break;
+        }
+        asf = ap.submit(createTask(access));
+      }
+      // DON'T do the wait in the try-with-resources. Otherwise, the undealt mutations won't
+      // be released.
+      asf.waitUntilDone();
+      if (asf.hasError()) {
+        errors.add(asf.getErrors());
+      }
+    }
+
+    RetriesExhaustedWithDetailsException exception = makeException(errors);
+    if (exception == null) {
+      return;
+    } else if(listener == null) {
+      throw exception;
+    } else {
+      listener.onException(exception, this);
+    }
+  }
+
+  private static RetriesExhaustedWithDetailsException makeException(
+    List<RetriesExhaustedWithDetailsException> errors) {
+    switch (errors.size()) {
+      case 0:
+        return null;
+      case 1:
+        return errors.get(0);
+      default:
+        List<Throwable> exceptions = new ArrayList<>();
+        List<Row> actions = new ArrayList<>();
+        List<String> hostnameAndPort = new ArrayList<>();
+        errors.forEach(e -> {
+          exceptions.addAll(e.exceptions);
+          actions.addAll(e.actions);
+          hostnameAndPort.addAll(e.hostnameAndPort);
+        });
+        return new RetriesExhaustedWithDetailsException(exceptions, actions, hostnameAndPort);
+    }
   }
 
   /**
@@ -428,41 +406,71 @@ public class BufferedMutatorImpl implements BufferedMutator {
     return currentWriteBufferSize.get();
   }
 
+  /**
+   * Count the mutations which haven't been processed.
+   * @return count of undealt mutation
+   */
   @VisibleForTesting
   int size() {
     return undealtMutationCount.get();
   }
 
-  private class QueueRowAccess implements RowAccess<Row> {
-    private int remainder = undealtMutationCount.getAndSet(0);
+  /**
+   * Count the mutations which haven't been flushed
+   * @return count of unflushed mutation
+   */
+  @VisibleForTesting
+  int getUnflushedSize() {
+    return writeAsyncBuffer.size();
+  }
 
-    void reset() {
-      restoreRemainder();
-      remainder = undealtMutationCount.getAndSet(0);
+  @VisibleForTesting
+  QueueRowAccess createQueueRowAccess() {
+    return new QueueRowAccess();
+  }
+
+  @VisibleForTesting
+  class QueueRowAccess implements RowAccess<Row>, Closeable {
+    private int remainder = undealtMutationCount.getAndSet(0);
+    private Mutation last = null;
+
+    private void restoreLastMutation() {
+      // restore the last mutation since it isn't submitted
+      if (last != null) {
+        writeAsyncBuffer.add(last);
+        currentWriteBufferSize.addAndGet(last.heapSize());
+        last = null;
+      }
+    }
+
+    @Override
+    public void close() {
+      restoreLastMutation();
+      if (remainder > 0) {
+        undealtMutationCount.addAndGet(remainder);
+        remainder = 0;
+      }
     }
 
     @Override
     public Iterator<Row> iterator() {
       return new Iterator<Row>() {
-        private final Iterator<Mutation> iter = writeAsyncBuffer.iterator();
         private int countDown = remainder;
-        private Mutation last = null;
         @Override
         public boolean hasNext() {
-          if (countDown <= 0) {
-            return false;
-          }
-          return iter.hasNext();
+          return countDown > 0;
         }
         @Override
         public Row next() {
+          restoreLastMutation();
           if (!hasNext()) {
             throw new NoSuchElementException();
           }
-          last = iter.next();
+          last = writeAsyncBuffer.poll();
           if (last == null) {
             throw new NoSuchElementException();
           }
+          currentWriteBufferSize.addAndGet(-last.heapSize());
           --countDown;
           return last;
         }
@@ -471,9 +479,8 @@ public class BufferedMutatorImpl implements BufferedMutator {
           if (last == null) {
             throw new IllegalStateException();
           }
-          iter.remove();
-          currentWriteBufferSize.addAndGet(-last.heapSize());
           --remainder;
+          last = null;
         }
       };
     }
@@ -481,13 +488,6 @@ public class BufferedMutatorImpl implements BufferedMutator {
     @Override
     public int size() {
       return remainder;
-    }
-
-    void restoreRemainder() {
-      if (remainder > 0) {
-        undealtMutationCount.addAndGet(remainder);
-        remainder = 0;
-      }
     }
 
     @Override

@@ -90,7 +90,7 @@ public class TestMasterReplication {
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestMasterReplication.class);
 
-  private static final Logger LOG = LoggerFactory.getLogger(TestReplicationBase.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestMasterReplication.class);
 
   private Configuration baseConfiguration;
 
@@ -136,11 +136,11 @@ public class TestMasterReplication {
         CoprocessorHost.USER_REGION_COPROCESSOR_CONF_KEY,
         CoprocessorCounter.class.getName());
     table = TableDescriptorBuilder.newBuilder(tableName)
-        .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(famName)
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(famName)
             .setScope(HConstants.REPLICATION_SCOPE_GLOBAL).build())
-        .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(famName1)
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(famName1)
             .setScope(HConstants.REPLICATION_SCOPE_GLOBAL).build())
-        .addColumnFamily(ColumnFamilyDescriptorBuilder.of(noRepfamName)).build();
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.of(noRepfamName)).build();
   }
 
   /**

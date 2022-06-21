@@ -28,7 +28,6 @@ import com.codahale.metrics.MetricRegistry;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Random;
@@ -41,7 +40,6 @@ import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
@@ -117,7 +115,6 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
   @Override
   public void setConf(Configuration conf) {
     super.setConf(conf);
-    TEST_UTIL = new HBaseTestingUtility(conf);
   }
 
   /**
@@ -183,7 +180,7 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
             long now = System.nanoTime();
             Put put = setupPut(rand, key, value, numFamilies);
             WALEdit walEdit = new WALEdit();
-            addFamilyMapToWALEdit(put.getFamilyCellMap(), walEdit);
+            walEdit.add(put.getFamilyCellMap());
             RegionInfo hri = region.getRegionInfo();
             final WALKeyImpl logkey =
                 new WALKeyImpl(hri.getEncodedNameAsBytes(), hri.getTable(), now, mvcc, scopes);
@@ -301,11 +298,15 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
     // In regionserver, number of handlers == number of threads.
     getConf().setInt(HConstants.REGION_SERVER_HANDLER_COUNT, numThreads);
 
+    if (rootRegionDir == null) {
+      TEST_UTIL = new HBaseTestingUtility(getConf());
+      rootRegionDir = TEST_UTIL.getDataTestDirOnTestFS("WALPerformanceEvaluation");
+    }
     // Run WAL Performance Evaluation
     // First set the fs from configs.  In case we are on hadoop1
     FSUtils.setFsDefault(getConf(), FSUtils.getRootDir(getConf()));
     FileSystem fs = FileSystem.get(getConf());
-    LOG.info("FileSystem: " + fs);
+    LOG.info("FileSystem={}, rootDir={}", fs, rootRegionDir);
 
     SpanReceiverHost receiverHost = trace ? SpanReceiverHost.getInstance(getConf()) : null;
     final Sampler sampler = trace ? Sampler.ALWAYS : Sampler.NEVER;
@@ -313,9 +314,6 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
     TraceScope scope = TraceUtil.createTrace("WALPerfEval");
 
     try {
-      if (rootRegionDir == null) {
-        rootRegionDir = TEST_UTIL.getDataTestDirOnTestFS("WALPerformanceEvaluation");
-      }
       rootRegionDir = rootRegionDir.makeQualified(fs.getUri(), fs.getWorkingDirectory());
       cleanRegionRootDir(fs, rootRegionDir);
       FSUtils.setRootDir(getConf(), rootRegionDir);
@@ -403,7 +401,7 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
         TableDescriptorBuilder.newBuilder(TableName.valueOf(TABLE_NAME + ":" + regionNum));
     IntStream.range(0, numFamilies)
         .mapToObj(i -> ColumnFamilyDescriptorBuilder.of(FAMILY_PREFIX + i))
-        .forEachOrdered(builder::addColumnFamily);
+        .forEachOrdered(builder::setColumnFamily);
     return builder.build();
   }
 
@@ -560,15 +558,6 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
       }
     }
     return put;
-  }
-
-  private void addFamilyMapToWALEdit(Map<byte[], List<Cell>> familyMap,
-      WALEdit walEdit) {
-    for (List<Cell> edits : familyMap.values()) {
-      for (Cell cell : edits) {
-        walEdit.add(cell);
-      }
-    }
   }
 
   private long runBenchmark(Runnable[] runnable, final int numThreads) throws InterruptedException {

@@ -45,6 +45,7 @@ import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -137,7 +138,11 @@ public class TestRogueRSAssignment {
     admin.setBalancerRunning(true, false);
   }
 
+  /**
+   * Ignore this test, see HBASE-21421
+   */
   @Test
+  @Ignore
   public void testReportRSWithWrongRegion() throws Exception {
     final TableName tableName = TableName.valueOf(this.name.getMethodName());
 
@@ -179,7 +184,7 @@ public class TestRogueRSAssignment {
 
   private List<HRegionInfo> createTable(final TableName tableName) throws Exception {
     TableDescriptorBuilder tdBuilder = TableDescriptorBuilder.newBuilder(tableName);
-    tdBuilder.addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILY).build());
+    tdBuilder.setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(FAMILY).build());
 
     byte[][] rows = new byte[initialRegionCount - 1][];
     for (int i = 0; i < rows.length; ++i) {

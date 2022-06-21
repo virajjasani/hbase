@@ -23,15 +23,17 @@
   import="org.apache.hadoop.hbase.util.VersionInfo"
   import="java.util.Date"
 %>
+<%@ page import="org.apache.hadoop.hbase.thrift.ImplType" %>
 
 <%
 Configuration conf = (Configuration)getServletContext().getAttribute("hbase.conf");
 long startcode = conf.getLong("startcode", System.currentTimeMillis());
 String listenPort = conf.get("hbase.regionserver.thrift.port", "9090");
 String serverInfo = listenPort + "," + String.valueOf(startcode);
-String implType = conf.get("hbase.regionserver.thrift.server.type", "threadpool");
+ImplType implType = ImplType.getServerImpl(conf);
+String framed = implType.isAlwaysFramed()
+    ? "true" : conf.get("hbase.regionserver.thrift.framed", "false");
 String compact = conf.get("hbase.regionserver.thrift.compact", "false");
-String framed = conf.get("hbase.regionserver.thrift.framed", "false");
 %>
 <!DOCTYPE html>
 <?xml version="1.0" encoding="UTF-8" ?>
@@ -64,14 +66,14 @@ String framed = conf.get("hbase.regionserver.thrift.framed", "false");
                 <li><a href="/logs/">Local logs</a></li>
                 <li><a href="/logLevel">Log Level</a></li>
                 <li><a href="/jmx">Metrics Dump</a></li>
+                <li><a href="/prof">Profiler</a></li>
                 <% if (HBaseConfiguration.isShowConfInServlet()) { %>
                 <li><a href="/conf">HBase Configuration</a></li>
                 <% } %>
             </ul>
           </div><!--/.nav-collapse -->
-        </div>
       </div>
-    </div>
+  </div>
 
 <div class="container-fluid content">
     <div class="row inner_header">
@@ -106,7 +108,7 @@ String framed = conf.get("hbase.regionserver.thrift.framed", "false");
         </tr>
         <tr>
             <td>Thrift Impl Type</td>
-            <td><%= implType %></td>
+            <td><%= implType.getOption() %></td>
             <td>Thrift RPC engine implementation type chosen by this Thrift server</td>
         </tr>
         <tr>

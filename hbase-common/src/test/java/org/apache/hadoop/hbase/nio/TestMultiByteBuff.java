@@ -43,6 +43,25 @@ public class TestMultiByteBuff {
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestMultiByteBuff.class);
 
+  /**
+   * Test right answer though we span many sub-buffers.
+   */
+  @Test
+  public void testGetShort() {
+    ByteBuffer bb1 = ByteBuffer.allocate(1);
+    bb1.put((byte)1);
+    ByteBuffer bb2 = ByteBuffer.allocate(1);
+    bb2.put((byte)0);
+    ByteBuffer bb3 = ByteBuffer.allocate(1);
+    bb3.put((byte)2);
+    ByteBuffer bb4 = ByteBuffer.allocate(1);
+    bb4.put((byte)3);
+    MultiByteBuff mbb = new MultiByteBuff(bb1, bb2, bb3, bb4);
+    assertEquals(256, mbb.getShortAfterPosition(0));
+    assertEquals(2, mbb.getShortAfterPosition(1));
+    assertEquals(515, mbb.getShortAfterPosition(2));
+  }
+
   @Test
   public void testWritesAndReads() {
     // Absolute reads
@@ -406,5 +425,36 @@ public class TestMultiByteBuff {
     assertTrue(mbb1.hasRemaining());
     mbb1.get(); // Now we have reached the limit
     assertFalse(mbb1.hasRemaining());
+  }
+
+  @Test
+  public void testGetPrimitivesWithSmallIndividualBBs() {
+    short s = 45;
+    int i = 2345;
+    long l = 75681526L;
+    ByteBuffer bb = ByteBuffer.allocate(14);
+    bb.putShort(s);
+    bb.putInt(i);
+    bb.putLong(l);
+
+    ByteBuffer bb1 = ((ByteBuffer) bb.duplicate().position(0).limit(1)).slice();
+    ByteBuffer bb2 = ((ByteBuffer) bb.duplicate().position(1).limit(3)).slice();
+    ByteBuffer bb3 = ((ByteBuffer) bb.duplicate().position(3).limit(5)).slice();
+    ByteBuffer bb4 = ((ByteBuffer) bb.duplicate().position(5).limit(11)).slice();
+    ByteBuffer bb5 = ((ByteBuffer) bb.duplicate().position(11).limit(12)).slice();
+    ByteBuffer bb6 = ((ByteBuffer) bb.duplicate().position(12).limit(14)).slice();
+    MultiByteBuff mbb = new MultiByteBuff(bb1, bb2, bb3, bb4, bb5, bb6);
+    assertEquals(s, mbb.getShortAfterPosition(0));
+    assertEquals(i, mbb.getIntAfterPosition(2));
+    assertEquals(l, mbb.getLongAfterPosition(6));
+
+    assertEquals(s, mbb.getShort(0));
+    assertEquals(i, mbb.getInt(2));
+    assertEquals(l, mbb.getLong(6));
+
+    mbb.position(0);
+    assertEquals(s, mbb.getShort());
+    assertEquals(i, mbb.getInt());
+    assertEquals(l, mbb.getLong());
   }
 }

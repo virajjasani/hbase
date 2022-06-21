@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -59,7 +59,7 @@ import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.HFileArchiveUtil;
-import org.apache.hadoop.hbase.util.Triple;
+import org.apache.zookeeper.KeeperException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -90,7 +90,7 @@ public class TestCatalogJanitor {
   }
 
   @Before
-  public void setup() throws IOException {
+  public void setup() throws IOException, KeeperException {
     setRootDirAndCleanIt(HTU, this.name.getMethodName());
     NavigableMap<ServerName, SortedSet<byte []>> regionsToRegionServers =
         new ConcurrentSkipListMap<ServerName, SortedSet<byte []>>();
@@ -173,7 +173,7 @@ public class TestCatalogJanitor {
    */
   private TableDescriptor createTableDescriptorForCurrentMethod() {
     return TableDescriptorBuilder.newBuilder(TableName.valueOf(this.name.getMethodName())).
-        addColumnFamily(new HColumnDescriptor(MockMasterServices.DEFAULT_COLUMN_FAMILY_NAME)).
+      setColumnFamily(new HColumnDescriptor(MockMasterServices.DEFAULT_COLUMN_FAMILY_NAME)).
         build();
   }
 
@@ -308,8 +308,13 @@ public class TestCatalogJanitor {
 
     final Map<HRegionInfo, Result> mergedRegions = new TreeMap<>();
     CatalogJanitor spy = spy(this.janitor);
-    doReturn(new Triple<>(10, mergedRegions, splitParents)).when(spy).
-      getMergedRegionsAndSplitParents();
+
+    CatalogJanitor.Report report = new CatalogJanitor.Report();
+    report.count = 10;
+    report.mergedRegions.putAll(mergedRegions);
+    report.splitParents.putAll(splitParents);
+
+    doReturn(report).when(spy).scanForReport();
 
     // Create ref from splita to parent
     LOG.info("parent=" + parent.getShortNameToLog() + ", splita=" + splita.getShortNameToLog());
@@ -318,14 +323,16 @@ public class TestCatalogJanitor {
     LOG.info("Created reference " + splitaRef);
 
     // Parent and splita should not be removed because a reference from splita to parent.
-    assertEquals(0, spy.scan());
+    int gcs = spy.scan();
+    assertEquals(0, gcs);
 
     // Now delete the ref
     FileSystem fs = FileSystem.get(HTU.getConfiguration());
     assertTrue(fs.delete(splitaRef, true));
 
     //now, both parent, and splita can be deleted
-    assertEquals(2, spy.scan());
+    gcs = spy.scan();
+    assertEquals(2, gcs);
   }
 
   /**

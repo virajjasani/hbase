@@ -53,7 +53,7 @@ public class TableRecordReaderImpl {
 
   // HBASE_COUNTER_GROUP_NAME is the name of mapreduce counter group for HBase
   @VisibleForTesting
-  static final String HBASE_COUNTER_GROUP_NAME = "HBase Counters";
+  static final String HBASE_COUNTER_GROUP_NAME = "HBaseCounters";
   private ResultScanner scanner = null;
   private Scan scan = null;
   private Scan currentScan = null;
@@ -77,6 +77,10 @@ public class TableRecordReaderImpl {
    * @throws IOException When restarting fails.
    */
   public void restart(byte[] firstRow) throws IOException {
+    // Update counter metrics based on current scan before reinitializing it
+    if (currentScan != null) {
+      updateCounters();
+    }
     currentScan = new Scan(scan);
     currentScan.withStartRow(firstRow);
     currentScan.setScanMetricsEnabled(true);
@@ -219,6 +223,7 @@ public class TableRecordReaderImpl {
       } catch (IOException e) {
         // do not retry if the exception tells us not to do so
         if (e instanceof DoNotRetryIOException) {
+          updateCounters();
           throw e;
         }
         // try to handle all other IOExceptions by restarting
@@ -240,8 +245,16 @@ public class TableRecordReaderImpl {
         if (value != null && value.isStale()) numStale++;
         numRestarts++;
       }
+
       if (value != null && value.size() > 0) {
         key.set(value.getRow());
+        lastSuccessfulRow = key.get();
+        return true;
+      }
+
+      // Need handle cursor result
+      if (value != null && value.isCursor()) {
+        key.set(value.getCursor().getRow());
         lastSuccessfulRow = key.get();
         return true;
       }
@@ -249,6 +262,7 @@ public class TableRecordReaderImpl {
       updateCounters();
       return false;
     } catch (IOException ioe) {
+      updateCounters();
       if (logScannerActivity) {
         long now = System.currentTimeMillis();
         LOG.info("Mapper took " + (now-timestamp)

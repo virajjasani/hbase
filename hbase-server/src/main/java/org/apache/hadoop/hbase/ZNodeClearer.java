@@ -25,13 +25,13 @@ import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.master.balancer.BaseLoadBalancer;
 import org.apache.hadoop.hbase.zookeeper.MasterAddressTracker;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
 import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.hadoop.hbase.zookeeper.ZNodePaths;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.zookeeper.KeeperException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,7 +48,8 @@ import org.slf4j.LoggerFactory;
  * file, and use it to delete it. for a master, as the znode path constant whatever the server, we
  * check its content to make sure that the backup server is not now in charge.</p>
  */
-public class ZNodeClearer {
+@InterfaceAudience.Private
+public final class ZNodeClearer {
   private static final Logger LOG = LoggerFactory.getLogger(ZNodeClearer.class);
 
   private ZNodeClearer() {}
@@ -185,7 +186,7 @@ public class ZNodeClearer {
       if (ZNodeClearer.tablesOnMaster(conf)) {
         // In case of master crash also remove rsZnode since master is also regionserver
         ZKUtil.deleteNodeFailSilent(zkw,
-          ZNodePaths.joinZNode(zkw.znodePaths.rsZNode, znodeFileContent));
+          ZNodePaths.joinZNode(zkw.getZNodePaths().rsZNode, znodeFileContent));
         return MasterAddressTracker.deleteIfEquals(zkw,
           ZNodeClearer.parseMasterServerName(znodeFileContent));
       } else {

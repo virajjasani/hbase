@@ -35,8 +35,8 @@ import org.apache.zookeeper.KeeperException;
  */
 @InterfaceAudience.Private
 public class ZKClusterId {
-  private ZKWatcher watcher;
-  private Abortable abortable;
+  private final ZKWatcher watcher;
+  private final Abortable abortable;
   private String id;
 
   public ZKClusterId(ZKWatcher watcher, Abortable abortable) {
@@ -61,11 +61,11 @@ public class ZKClusterId {
   }
 
   public static String readClusterIdZNode(ZKWatcher watcher)
-  throws KeeperException {
-    if (ZKUtil.checkExists(watcher, watcher.znodePaths.clusterIdZNode) != -1) {
+    throws KeeperException {
+    if (ZKUtil.checkExists(watcher, watcher.getZNodePaths().clusterIdZNode) != -1) {
       byte [] data;
       try {
-        data = ZKUtil.getData(watcher, watcher.znodePaths.clusterIdZNode);
+        data = ZKUtil.getData(watcher, watcher.getZNodePaths().clusterIdZNode);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         return null;
@@ -83,7 +83,7 @@ public class ZKClusterId {
 
   public static void setClusterId(ZKWatcher watcher, ClusterId id)
       throws KeeperException {
-    ZKUtil.createSetData(watcher, watcher.znodePaths.clusterIdZNode, id.toByteArray());
+    ZKUtil.createSetData(watcher, watcher.getZNodePaths().clusterIdZNode, id.toByteArray());
   }
 
   /**

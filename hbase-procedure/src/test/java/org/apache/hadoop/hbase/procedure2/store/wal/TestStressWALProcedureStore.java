@@ -18,9 +18,7 @@
 package org.apache.hadoop.hbase.procedure2.store.wal;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.util.Random;
@@ -115,7 +113,9 @@ public class TestStressWALProcedureStore {
             procStore.insert(proc, null);
             // Update
             for (int i = 0, nupdates = rand.nextInt(10); i <= nupdates; ++i) {
-              try { Thread.sleep(0, rand.nextInt(15)); } catch (InterruptedException e) {}
+              try {
+                Thread.sleep(0, rand.nextInt(15));
+              } catch (InterruptedException e) {}
               procStore.update(proc);
             }
             // Delete

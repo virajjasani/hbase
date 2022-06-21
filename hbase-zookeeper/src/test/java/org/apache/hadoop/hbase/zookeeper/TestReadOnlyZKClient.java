@@ -38,6 +38,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Exchanger;
 import java.util.concurrent.ExecutionException;
@@ -70,8 +72,6 @@ public class TestReadOnlyZKClient {
 
   private static HBaseZKTestingUtility UTIL = new HBaseZKTestingUtility();
 
-  private static int PORT;
-
   private static String PATH = "/test";
 
   private static byte[] DATA;
@@ -82,9 +82,9 @@ public class TestReadOnlyZKClient {
 
   @BeforeClass
   public static void setUp() throws Exception {
-    PORT = UTIL.startMiniZKCluster().getClientPort();
+    final int port = UTIL.startMiniZKCluster().getClientPort();
 
-    ZooKeeper zk = ZooKeeperHelper.getConnectedZooKeeper("localhost:" + PORT, 10000);
+    ZooKeeper zk = ZooKeeperHelper.getConnectedZooKeeper("localhost:" + port, 10000);
     DATA = new byte[10];
     ThreadLocalRandom.current().nextBytes(DATA);
     zk.create(PATH, DATA, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
@@ -93,7 +93,7 @@ public class TestReadOnlyZKClient {
     }
     zk.close();
     Configuration conf = UTIL.getConfiguration();
-    conf.set(HConstants.ZOOKEEPER_QUORUM, "localhost:" + PORT);
+    conf.set(HConstants.ZOOKEEPER_QUORUM, "localhost:" + port);
     conf.setInt(ReadOnlyZKClient.RECOVERY_RETRY, 3);
     conf.setInt(ReadOnlyZKClient.RECOVERY_RETRY_INTERVAL_MILLIS, 100);
     conf.setInt(ReadOnlyZKClient.KEEPALIVE_MILLIS, 3000);
@@ -114,21 +114,27 @@ public class TestReadOnlyZKClient {
     UTIL.waitFor(10000, new ExplainingPredicate<Exception>() {
 
       @Override
-      public boolean evaluate() throws Exception {
+      public boolean evaluate() {
         return RO_ZK.zookeeper == null;
       }
 
       @Override
-      public String explainFailure() throws Exception {
+      public String explainFailure() {
         return "Connection to zookeeper is still alive";
       }
     });
   }
 
   @Test
-  public void testGetAndExists() throws Exception {
+  public void testRead() throws Exception {
     assertArrayEquals(DATA, RO_ZK.get(PATH).get());
     assertEquals(CHILDREN, RO_ZK.exists(PATH).get().getNumChildren());
+    List<String> children = RO_ZK.list(PATH).get();
+    assertEquals(CHILDREN, children.size());
+    Collections.sort(children);
+    for (int i = 0; i < CHILDREN; i++) {
+      assertEquals("c" + i, children.get(i));
+    }
     assertNotNull(RO_ZK.zookeeper);
     waitForIdleConnectionClosed();
   }
@@ -138,6 +144,15 @@ public class TestReadOnlyZKClient {
     String pathNotExists = PATH + "_whatever";
     try {
       RO_ZK.get(pathNotExists).get();
+      fail("should fail because of " + pathNotExists + " does not exist");
+    } catch (ExecutionException e) {
+      assertThat(e.getCause(), instanceOf(KeeperException.class));
+      KeeperException ke = (KeeperException) e.getCause();
+      assertEquals(Code.NONODE, ke.code());
+      assertEquals(pathNotExists, ke.getPath());
+    }
+    try {
+      RO_ZK.list(pathNotExists).get();
       fail("should fail because of " + pathNotExists + " does not exist");
     } catch (ExecutionException e) {
       assertThat(e.getCause(), instanceOf(KeeperException.class));

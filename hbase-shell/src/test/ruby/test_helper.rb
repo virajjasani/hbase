@@ -43,7 +43,7 @@ module Hbase
 
     def setup_hbase
       hbase = ::Hbase::Hbase.new($TEST_CLUSTER.getConfiguration)
-      @shell = ::Shell::Shell.new(hbase, interactive = false, return_values = true)
+      @shell = ::Shell::Shell.new(hbase, interactive = false)
     end
     
     def shutdown
@@ -102,14 +102,29 @@ module Hbase
 
     def create_test_table_with_splits(name, splits)
       # Create the table if needed
+      command(:create, name, 'f1', splits) unless admin.exists?(name)
+
+      # Enable the table if needed
+      admin.enable(name) unless admin.enabled?(name)
+    end
+
+    def create_test_table_with_splits_file(name, splits_file)
+      # Create the table if needed
+      command(:create, name, 'f1', splits_file) unless admin.exists?(name)
+
+      # Enable the table if needed
+      admin.enable(name) unless admin.enabled?(name)
+    end
+
+    def create_test_table_with_region_replicas(name, num_of_replicas, splits)
+      # Create the table if needed
       unless admin.exists?(name)
-        command(:create, name, 'f1', splits)
+        command(:create, name, 'f1', { REGION_REPLICATION => num_of_replicas },
+                splits)
       end
 
       # Enable the table if needed
-      unless admin.enabled?(name)
-        admin.enable(name)
-      end
+      admin.enable(name) unless admin.enabled?(name)
     end
 
     def drop_test_table(name)

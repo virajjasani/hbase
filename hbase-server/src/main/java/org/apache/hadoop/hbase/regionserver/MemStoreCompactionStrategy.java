@@ -42,7 +42,7 @@ public abstract class MemStoreCompactionStrategy {
   // The upper bound for the number of segments we store in the pipeline prior to merging.
   public static final String COMPACTING_MEMSTORE_THRESHOLD_KEY =
       "hbase.hregion.compacting.pipeline.segments.limit";
-  public static final int COMPACTING_MEMSTORE_THRESHOLD_DEFAULT = 4;
+  public static final int COMPACTING_MEMSTORE_THRESHOLD_DEFAULT = 2;
 
   /**
    * Types of actions to be done on the pipeline upon MemStoreCompaction invocation.
@@ -73,6 +73,13 @@ public abstract class MemStoreCompactionStrategy {
     }
   }
 
+  @Override
+  public String toString() {
+    return getName() + ", pipelineThreshold=" + this.pipelineThreshold;
+  }
+
+  protected abstract String getName();
+
   // get next compaction action to apply on compaction pipeline
   public abstract Action getAction(VersionedSegmentsList versionedList);
   // update policy stats based on the segment that replaced previous versioned list (in
@@ -85,13 +92,12 @@ public abstract class MemStoreCompactionStrategy {
     int numOfSegments = versionedList.getNumOfSegments();
     if (numOfSegments > pipelineThreshold) {
       // to avoid too many segments, merge now
-      LOG.debug("{} in-memory compaction of {}; merging {} segments",
-          strategy, cfName, numOfSegments);
+      LOG.trace("Strategy={}, store={}; merging {} segments", strategy, cfName, numOfSegments);
       return getMergingAction();
     }
 
     // just flatten a segment
-    LOG.debug("{} in-memory compaction of {}; flattening a segment", strategy, cfName);
+    LOG.trace("Strategy={}, store={}; flattening a segment", strategy, cfName);
     return getFlattenAction();
   }
 
@@ -105,9 +111,8 @@ public abstract class MemStoreCompactionStrategy {
 
   protected Action compact(VersionedSegmentsList versionedList, String strategyInfo) {
     int numOfSegments = versionedList.getNumOfSegments();
-    LOG.debug(strategyInfo+" memory compaction for store " + cfName
-        + " compacting " + numOfSegments + " segments");
+    LOG.trace("{} in-memory compaction for store={} compacting {} segments", strategyInfo,
+        cfName, numOfSegments);
     return Action.COMPACT;
   }
-
 }

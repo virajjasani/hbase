@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -24,12 +24,14 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.spy;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
-import java.util.Random;
+import java.util.concurrent.ThreadLocalRandom;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang3.RandomUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
@@ -48,28 +50,22 @@ import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.master.HMaster;
-import org.apache.hadoop.hbase.replication.ReplicationFactory;
-import org.apache.hadoop.hbase.replication.ReplicationQueues;
-import org.apache.hadoop.hbase.replication.ReplicationQueuesArguments;
-import org.apache.hadoop.hbase.replication.ReplicationQueuesClientZKImpl;
+import org.apache.hadoop.hbase.replication.ReplicationQueueStorage;
+import org.apache.hadoop.hbase.replication.ReplicationStorageFactory;
 import org.apache.hadoop.hbase.replication.master.ReplicationLogCleaner;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
-import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.hbase.zookeeper.RecoverableZooKeeper;
 import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.zookeeper.KeeperException;
-import org.apache.zookeeper.data.Stat;
 import org.junit.AfterClass;
+import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-import org.mockito.Mockito;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 @Category({MasterTests.class, MediumTests.class})
 public class TestLogsCleaner {
@@ -81,16 +77,40 @@ public class TestLogsCleaner {
   private static final Logger LOG = LoggerFactory.getLogger(TestLogsCleaner.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
 
+  private static final Path OLD_WALS_DIR =
+      new Path(TEST_UTIL.getDataTestDir(), HConstants.HREGION_OLDLOGDIR_NAME);
+
+  private static final Path OLD_PROCEDURE_WALS_DIR =
+      new Path(OLD_WALS_DIR, "masterProcedureWALs");
+
+  private static Configuration conf;
+
+  private static DirScanPool POOL;
+
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
     TEST_UTIL.startMiniZKCluster();
     TEST_UTIL.startMiniDFSCluster(1);
+    POOL = new DirScanPool(TEST_UTIL.getConfiguration());
   }
 
   @AfterClass
   public static void tearDownAfterClass() throws Exception {
     TEST_UTIL.shutdownMiniZKCluster();
     TEST_UTIL.shutdownMiniDFSCluster();
+    POOL.shutdownNow();
+  }
+
+  @Before
+  public void beforeTest() throws IOException {
+    conf = TEST_UTIL.getConfiguration();
+
+    FileSystem fs = TEST_UTIL.getDFSCluster().getFileSystem();
+
+    fs.delete(OLD_WALS_DIR, true);
+
+    // root directory
+    fs.mkdirs(OLD_WALS_DIR);
   }
 
   /**
@@ -112,7 +132,6 @@ public class TestLogsCleaner {
    */
   @Test
   public void testLogCleaning() throws Exception {
-    Configuration conf = TEST_UTIL.getConfiguration();
     // set TTLs
     long ttlWAL = 2000;
     long ttlProcedureWAL = 4000;
@@ -121,26 +140,25 @@ public class TestLogsCleaner {
 
     HMaster.decorateMasterConfiguration(conf);
     Server server = new DummyServer();
-    ReplicationQueues repQueues = ReplicationFactory.getReplicationQueues(
-        new ReplicationQueuesArguments(conf, server, server.getZooKeeper()));
-    repQueues.init(server.getServerName().toString());
-    final Path oldLogDir = new Path(TEST_UTIL.getDataTestDir(), HConstants.HREGION_OLDLOGDIR_NAME);
-    final Path oldProcedureWALDir = new Path(oldLogDir, "masterProcedureWALs");
-    String fakeMachineName = URLEncoder.encode(server.getServerName().toString(), "UTF8");
+    ReplicationQueueStorage queueStorage =
+        ReplicationStorageFactory.getReplicationQueueStorage(server.getZooKeeper(), conf);
+
+    String fakeMachineName = URLEncoder.encode(
+        server.getServerName().toString(), StandardCharsets.UTF_8.name());
 
     final FileSystem fs = FileSystem.get(conf);
+    fs.mkdirs(OLD_PROCEDURE_WALS_DIR);
 
-    long now = System.currentTimeMillis();
-    fs.delete(oldLogDir, true);
-    fs.mkdirs(oldLogDir);
+    final long now = System.currentTimeMillis();
 
     // Case 1: 2 invalid files, which would be deleted directly
-    fs.createNewFile(new Path(oldLogDir, "a"));
-    fs.createNewFile(new Path(oldLogDir, fakeMachineName + "." + "a"));
+    fs.createNewFile(new Path(OLD_WALS_DIR, "a"));
+    fs.createNewFile(new Path(OLD_WALS_DIR, fakeMachineName + "." + "a"));
 
     // Case 2: 5 Procedure WALs that are old which would be deleted
-    for (int i = 1; i < 6; i++) {
-      Path fileName = new Path(oldProcedureWALDir, String.format("pv2-%020d.log", i));
+    for (int i = 1; i <= 5; i++) {
+      final Path fileName =
+          new Path(OLD_PROCEDURE_WALS_DIR, String.format("pv2-%020d.log", i));
       fs.createNewFile(fileName);
     }
 
@@ -148,75 +166,58 @@ public class TestLogsCleaner {
     Thread.sleep(ttlProcedureWAL - ttlWAL);
 
     // Case 3: old WALs which would be deletable
-    for (int i = 1; i < 31; i++) {
-      Path fileName = new Path(oldLogDir, fakeMachineName + "." + (now - i));
+    for (int i = 1; i <= 30; i++) {
+      Path fileName = new Path(OLD_WALS_DIR, fakeMachineName + "." + (now - i));
       fs.createNewFile(fileName);
       // Case 4: put 3 WALs in ZK indicating that they are scheduled for replication so these
       // files would pass TimeToLiveLogCleaner but would be rejected by ReplicationLogCleaner
-      if (i % (30 / 3) == 1) {
-        repQueues.addLog(fakeMachineName, fileName.getName());
+      if (i % (30 / 3) == 0) {
+        queueStorage.addWAL(server.getServerName(), fakeMachineName, fileName.getName());
         LOG.info("Replication log file: " + fileName);
       }
     }
 
     // Case 5: 5 Procedure WALs that are new, will stay
-    for (int i = 6; i < 11; i++) {
-      Path fileName = new Path(oldProcedureWALDir, String.format("pv2-%020d.log", i));
+    for (int i = 6; i <= 10; i++) {
+      Path fileName =
+          new Path(OLD_PROCEDURE_WALS_DIR, String.format("pv2-%020d.log", i));
       fs.createNewFile(fileName);
     }
 
     // Sleep for sometime to get newer modification time
     Thread.sleep(ttlWAL);
-    fs.createNewFile(new Path(oldLogDir, fakeMachineName + "." + now));
+    fs.createNewFile(new Path(OLD_WALS_DIR, fakeMachineName + "." + now));
 
     // Case 6: 1 newer WAL, not even deletable for TimeToLiveLogCleaner,
     // so we are not going down the chain
-    fs.createNewFile(new Path(oldLogDir, fakeMachineName + "." + (now + ttlWAL)));
+    fs.createNewFile(new Path(OLD_WALS_DIR, fakeMachineName + "." + (now + ttlWAL)));
 
-    for (FileStatus stat : fs.listStatus(oldLogDir)) {
-      LOG.info(stat.getPath().toString());
-    }
+    FileStatus[] status = fs.listStatus(OLD_WALS_DIR);
+    LOG.info("File status: {}", Arrays.toString(status));
 
-    // There should be 34 files and masterProcedureWALs directory
-    assertEquals(35, fs.listStatus(oldLogDir).length);
+    // There should be 34 files and 1 masterProcedureWALs directory
+    assertEquals(35, fs.listStatus(OLD_WALS_DIR).length);
     // 10 procedure WALs
-    assertEquals(10, fs.listStatus(oldProcedureWALDir).length);
+    assertEquals(10, fs.listStatus(OLD_PROCEDURE_WALS_DIR).length);
 
-    LogCleaner cleaner = new LogCleaner(1000, server, conf, fs, oldLogDir);
+    LogCleaner cleaner = new LogCleaner(1000, server, conf, fs, OLD_WALS_DIR, POOL);
     cleaner.chore();
 
     // In oldWALs we end up with the current WAL, a newer WAL, the 3 old WALs which
     // are scheduled for replication and masterProcedureWALs directory
-    TEST_UTIL.waitFor(1000,
-        (Waiter.Predicate<Exception>) () -> 6 == fs.listStatus(oldLogDir).length);
+    TEST_UTIL.waitFor(1000, (Waiter.Predicate<Exception>) () -> 6 == fs
+        .listStatus(OLD_WALS_DIR).length);
     // In masterProcedureWALs we end up with 5 newer Procedure WALs
-    TEST_UTIL.waitFor(1000,
-        (Waiter.Predicate<Exception>) () -> 5 == fs.listStatus(oldProcedureWALDir).length);
+    TEST_UTIL.waitFor(1000, (Waiter.Predicate<Exception>) () -> 5 == fs
+        .listStatus(OLD_PROCEDURE_WALS_DIR).length);
 
-    for (FileStatus file : fs.listStatus(oldLogDir)) {
-      LOG.debug("Kept log file in oldWALs: " + file.getPath().getName());
+    if (LOG.isDebugEnabled()) {
+      FileStatus[] statusOldWALs = fs.listStatus(OLD_WALS_DIR);
+      FileStatus[] statusProcedureWALs = fs.listStatus(OLD_PROCEDURE_WALS_DIR);
+      LOG.debug("Kept log file for oldWALs: {}", Arrays.toString(statusOldWALs));
+      LOG.debug("Kept log file for masterProcedureWALs: {}",
+          Arrays.toString(statusProcedureWALs));
     }
-    for (FileStatus file : fs.listStatus(oldProcedureWALDir)) {
-      LOG.debug("Kept log file in masterProcedureWALs: " + file.getPath().getName());
-    }
-  }
-
-  @Test
-  public void testZnodeCversionChange() throws Exception {
-    Configuration conf = TEST_UTIL.getConfiguration();
-    ReplicationLogCleaner cleaner = new ReplicationLogCleaner();
-    cleaner.setConf(conf);
-
-    ReplicationQueuesClientZKImpl rqcMock = Mockito.mock(ReplicationQueuesClientZKImpl.class);
-    Mockito.when(rqcMock.getQueuesZNodeCversion()).thenReturn(1, 2, 3, 4);
-
-    Field rqc = ReplicationLogCleaner.class.getDeclaredField("replicationQueues");
-    rqc.setAccessible(true);
-
-    rqc.set(cleaner, rqcMock);
-
-    // This should return eventually when cversion stabilizes
-    cleaner.getDeletableFiles(new LinkedList<>());
   }
 
   /**
@@ -227,7 +228,7 @@ public class TestLogsCleaner {
     Configuration conf = TEST_UTIL.getConfiguration();
     ReplicationLogCleaner cleaner = new ReplicationLogCleaner();
 
-    List<FileStatus> dummyFiles = Lists.newArrayList(
+    List<FileStatus> dummyFiles = Arrays.asList(
         new FileStatus(100, false, 3, 100, System.currentTimeMillis(), new Path("log1")),
         new FileStatus(100, false, 3, 100, System.currentTimeMillis(), new Path("log2"))
     );
@@ -258,23 +259,49 @@ public class TestLogsCleaner {
     }
   }
 
+  /**
+   * When zk is working both files should be returned
+   * @throws Exception from ZK watcher
+   */
+  @Test
+  public void testZooKeeperNormal() throws Exception {
+    ReplicationLogCleaner cleaner = new ReplicationLogCleaner();
+
+    List<FileStatus> dummyFiles = Arrays.asList(
+        new FileStatus(100, false, 3, 100, System.currentTimeMillis(), new Path("log1")),
+        new FileStatus(100, false, 3, 100, System.currentTimeMillis(), new Path("log2"))
+    );
+
+    ZKWatcher zkw = new ZKWatcher(conf, "testZooKeeperAbort-normal", null);
+    try {
+      cleaner.setConf(conf, zkw);
+      cleaner.preClean();
+      Iterable<FileStatus> filesToDelete = cleaner.getDeletableFiles(dummyFiles);
+      Iterator<FileStatus> iter = filesToDelete.iterator();
+      assertTrue(iter.hasNext());
+      assertEquals(new Path("log1"), iter.next().getPath());
+      assertTrue(iter.hasNext());
+      assertEquals(new Path("log2"), iter.next().getPath());
+      assertFalse(iter.hasNext());
+    } finally {
+      zkw.close();
+    }
+  }
+
   @Test
   public void testOnConfigurationChange() throws Exception {
-    Configuration conf = TEST_UTIL.getConfiguration();
-    conf.setInt(LogCleaner.OLD_WALS_CLEANER_SIZE, LogCleaner.OLD_WALS_CLEANER_DEFAULT_SIZE);
     // Prepare environments
     Server server = new DummyServer();
-    Path oldWALsDir = new Path(TEST_UTIL.getDefaultRootDirPath(),
-        HConstants.HREGION_OLDLOGDIR_NAME);
+
     FileSystem fs = TEST_UTIL.getDFSCluster().getFileSystem();
-    LogCleaner cleaner = new LogCleaner(3000, server, conf, fs, oldWALsDir);
-    assertEquals(LogCleaner.OLD_WALS_CLEANER_DEFAULT_SIZE, cleaner.getSizeOfCleaners());
+    LogCleaner cleaner = new LogCleaner(3000, server, conf, fs, OLD_WALS_DIR, POOL);
+    assertEquals(LogCleaner.DEFAULT_OLD_WALS_CLEANER_THREAD_SIZE, cleaner.getSizeOfCleaners());
+    assertEquals(LogCleaner.DEFAULT_OLD_WALS_CLEANER_THREAD_TIMEOUT_MSEC,
+        cleaner.getCleanerThreadTimeoutMsec());
     // Create dir and files for test
-    fs.delete(oldWALsDir, true);
-    fs.mkdirs(oldWALsDir);
     int numOfFiles = 10;
-    createFiles(fs, oldWALsDir, numOfFiles);
-    FileStatus[] status = fs.listStatus(oldWALsDir);
+    createFiles(fs, OLD_WALS_DIR, numOfFiles);
+    FileStatus[] status = fs.listStatus(OLD_WALS_DIR);
     assertEquals(numOfFiles, status.length);
     // Start cleaner chore
     Thread thread = new Thread(() -> cleaner.chore());
@@ -282,25 +309,25 @@ public class TestLogsCleaner {
     thread.start();
     // change size of cleaners dynamically
     int sizeToChange = 4;
-    conf.setInt(LogCleaner.OLD_WALS_CLEANER_SIZE, sizeToChange);
+    long threadTimeoutToChange = 30 * 1000L;
+    conf.setInt(LogCleaner.OLD_WALS_CLEANER_THREAD_SIZE, sizeToChange);
+    conf.setLong(LogCleaner.OLD_WALS_CLEANER_THREAD_TIMEOUT_MSEC, threadTimeoutToChange);
     cleaner.onConfigurationChange(conf);
     assertEquals(sizeToChange, cleaner.getSizeOfCleaners());
+    assertEquals(threadTimeoutToChange, cleaner.getCleanerThreadTimeoutMsec());
     // Stop chore
     thread.join();
-    status = fs.listStatus(oldWALsDir);
+    status = fs.listStatus(OLD_WALS_DIR);
     assertEquals(0, status.length);
   }
 
   private void createFiles(FileSystem fs, Path parentDir, int numOfFiles) throws IOException {
-    Random random = new Random();
     for (int i = 0; i < numOfFiles; i++) {
-      int xMega = 1 + random.nextInt(3); // size of each file is between 1~3M
+      // size of each file is 1M, 2M, or 3M
+      int xMega = 1 + ThreadLocalRandom.current().nextInt(1, 4);
       try (FSDataOutputStream fsdos = fs.create(new Path(parentDir, "file-" + i))) {
-        for (int m = 0; m < xMega; m++) {
-          byte[] M = new byte[1024 * 1024];
-          random.nextBytes(M);
-          fsdos.write(M);
-        }
+        byte[] M = RandomUtils.nextBytes(Math.toIntExact(FileUtils.ONE_MB * xMega));
+        fsdos.write(M);
       }
     }
   }
@@ -329,11 +356,6 @@ public class TestLogsCleaner {
 
     @Override
     public ClusterConnection getConnection() {
-      return null;
-    }
-
-    @Override
-    public MetaTableLocator getMetaTableLocator() {
       return null;
     }
 
@@ -395,7 +417,7 @@ public class TestLogsCleaner {
     public void init() throws Exception {
       this.zk = spy(super.getRecoverableZooKeeper());
       doThrow(new KeeperException.ConnectionLossException())
-          .when(zk).getData("/hbase/replication/rs", null, new Stat());
+        .when(zk).getChildren("/hbase/replication/rs", null);
     }
 
     @Override

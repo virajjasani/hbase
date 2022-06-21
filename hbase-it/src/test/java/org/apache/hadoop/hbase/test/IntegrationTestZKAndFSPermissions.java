@@ -25,13 +25,13 @@ import static org.junit.Assert.fail;
 import java.io.IOException;
 import java.util.List;
 
-import org.apache.commons.cli.CommandLine;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.IntegrationTestingUtility;
+import org.apache.hadoop.hbase.security.SecurityConstants;
 import org.apache.hadoop.hbase.testclassification.IntegrationTests;
 import org.apache.hadoop.hbase.util.AbstractHBaseTool;
 import org.apache.hadoop.hbase.util.FSUtils;
@@ -51,6 +51,8 @@ import org.apache.zookeeper.data.Stat;
 import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLine;
 
 /**
  * An integration test which checks that the znodes in zookeeper and data in the FileSystem
@@ -103,7 +105,7 @@ public class IntegrationTestZKAndFSPermissions extends AbstractHBaseTool {
   @Override
   protected void processOptions(CommandLine cmd) {
     isForce = cmd.hasOption(FORCE_CHECK_ARG);
-    masterPrincipal = getShortUserName(conf.get("hbase.master.kerberos.principal"));
+    masterPrincipal = getShortUserName(conf.get(SecurityConstants.MASTER_KRB_PRINCIPAL));
     superUser = cmd.getOptionValue(SUPERUSER_ARG, conf.get("hbase.superuser"));
     masterPrincipal = cmd.getOptionValue(PRINCIPAL_ARG, masterPrincipal);
     fsPerms = cmd.getOptionValue(FS_PERMS, "700");
@@ -143,7 +145,7 @@ public class IntegrationTestZKAndFSPermissions extends AbstractHBaseTool {
     ZKWatcher watcher = new ZKWatcher(conf, "IntegrationTestZnodeACLs", null);
     RecoverableZooKeeper zk = ZKUtil.connect(this.conf, watcher);
 
-    String baseZNode = watcher.znodePaths.baseZNode;
+    String baseZNode = watcher.getZNodePaths().baseZNode;
 
     LOG.info("");
     LOG.info("***********************************************************************************");
@@ -159,7 +161,7 @@ public class IntegrationTestZKAndFSPermissions extends AbstractHBaseTool {
   private void checkZnodePermsRecursive(ZKWatcher watcher,
       RecoverableZooKeeper zk, String znode) throws KeeperException, InterruptedException {
 
-    boolean expectedWorldReadable = watcher.znodePaths.isClientReadable(znode);
+    boolean expectedWorldReadable = watcher.getZNodePaths().isClientReadable(znode);
 
     assertZnodePerms(zk, znode, expectedWorldReadable);
 

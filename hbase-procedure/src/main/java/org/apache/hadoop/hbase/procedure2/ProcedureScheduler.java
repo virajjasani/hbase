@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase.procedure2;
 
 import java.util.Iterator;
@@ -53,6 +52,13 @@ public interface ProcedureScheduler {
   void addFront(Procedure proc);
 
   /**
+   * Inserts the specified element at the front of this queue.
+   * @param proc the Procedure to add
+   * @param notify whether need to notify worker
+   */
+  void addFront(Procedure proc, boolean notify);
+
+  /**
    * Inserts all elements in the iterator at the front of this queue.
    */
   void addFront(Iterator<Procedure> procedureIterator);
@@ -62,6 +68,13 @@ public interface ProcedureScheduler {
    * @param proc the Procedure to add
    */
   void addBack(Procedure proc);
+
+  /**
+   * Inserts the specified element at the end of this queue.
+   * @param proc the Procedure to add
+   * @param notify whether need to notify worker
+   */
+  void addBack(Procedure proc, boolean notify);
 
   /**
    * The procedure can't run at the moment.
@@ -103,7 +116,8 @@ public interface ProcedureScheduler {
   List<LockedResource> getLocks();
 
   /**
-   * @return {@link LockedResource} for resource of specified type & name. null if resource is not locked.
+   * @return {@link LockedResource} for resource of specified type & name. null if resource is not
+   *         locked.
    */
   LockedResource getLockResource(LockedResourceType resourceType, String resourceName);
 

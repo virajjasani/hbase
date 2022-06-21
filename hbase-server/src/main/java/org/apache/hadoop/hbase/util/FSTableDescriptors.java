@@ -37,6 +37,8 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
+import org.apache.hadoop.hbase.client.CoprocessorDescriptorBuilder;
+import org.apache.hadoop.hbase.coprocessor.MultiRowMutationEndpoint;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -149,57 +151,37 @@ public class FSTableDescriptors implements TableDescriptors {
     // the META table data goes to File mode BC only. Test how that affect the system. If too much,
     // we have to rethink about adding back the setCacheDataInL1 for META table CFs.
     return TableDescriptorBuilder.newBuilder(TableName.META_TABLE_NAME)
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(HConstants.CATALOG_FAMILY)
-                    .setMaxVersions(conf.getInt(HConstants.HBASE_META_VERSIONS,
-                            HConstants.DEFAULT_HBASE_META_VERSIONS))
-                    .setInMemory(true)
-                    .setBlocksize(conf.getInt(HConstants.HBASE_META_BLOCK_SIZE,
-                            HConstants.DEFAULT_HBASE_META_BLOCK_SIZE))
-                    .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
-                    // Disable blooms for meta.  Needs work.  Seems to mess w/ getClosestOrBefore.
-                    .setBloomFilterType(BloomType.NONE)
-                    .build())
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(HConstants.REPLICATION_BARRIER_FAMILY)
-                    .setMaxVersions(conf.getInt(HConstants.HBASE_META_VERSIONS,
-                            HConstants.DEFAULT_HBASE_META_VERSIONS))
-                    .setInMemory(true)
-                    .setBlocksize(conf.getInt(HConstants.HBASE_META_BLOCK_SIZE,
-                            HConstants.DEFAULT_HBASE_META_BLOCK_SIZE))
-                    .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
-                    // Disable blooms for meta.  Needs work.  Seems to mess w/ getClosestOrBefore.
-                    .setBloomFilterType(BloomType.NONE)
-                    .build())
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(HConstants.REPLICATION_POSITION_FAMILY)
-                    .setMaxVersions(conf.getInt(HConstants.HBASE_META_VERSIONS,
-                            HConstants.DEFAULT_HBASE_META_VERSIONS))
-                    .setInMemory(true)
-                    .setBlocksize(conf.getInt(HConstants.HBASE_META_BLOCK_SIZE,
-                            HConstants.DEFAULT_HBASE_META_BLOCK_SIZE))
-                    .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
-                    // Disable blooms for meta.  Needs work.  Seems to mess w/ getClosestOrBefore.
-                    .setBloomFilterType(BloomType.NONE)
-                    .build())
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(HConstants.REPLICATION_META_FAMILY)
-                    .setMaxVersions(conf.getInt(HConstants.HBASE_META_VERSIONS,
-                            HConstants.DEFAULT_HBASE_META_VERSIONS))
-                    .setInMemory(true)
-                    .setBlocksize(conf.getInt(HConstants.HBASE_META_BLOCK_SIZE,
-                            HConstants.DEFAULT_HBASE_META_BLOCK_SIZE))
-                    .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
-                    // Disable blooms for meta.  Needs work.  Seems to mess w/ getClosestOrBefore.
-                    .setBloomFilterType(BloomType.NONE)
-                    .build())
-            .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(HConstants.TABLE_FAMILY)
-                    .setMaxVersions(conf.getInt(HConstants.HBASE_META_VERSIONS,
-                        HConstants.DEFAULT_HBASE_META_VERSIONS))
-                    .setInMemory(true)
-                    .setBlocksize(8 * 1024)
-                    .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
-                    // Disable blooms for meta.  Needs work.  Seems to mess w/ getClosestOrBefore.
-                    .setBloomFilterType(BloomType.NONE)
-                    .build())
-            .addCoprocessor("org.apache.hadoop.hbase.coprocessor.MultiRowMutationEndpoint",
-                    null, Coprocessor.PRIORITY_SYSTEM, null);
+      .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(HConstants.CATALOG_FAMILY)
+        .setMaxVersions(conf.getInt(HConstants.HBASE_META_VERSIONS,
+          HConstants.DEFAULT_HBASE_META_VERSIONS))
+        .setInMemory(true)
+        .setBlocksize(conf.getInt(HConstants.HBASE_META_BLOCK_SIZE,
+          HConstants.DEFAULT_HBASE_META_BLOCK_SIZE))
+        .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
+        // Disable blooms for meta.  Needs work.  Seems to mess w/ getClosestOrBefore.
+        .setBloomFilterType(BloomType.NONE)
+        .build())
+      .setColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(HConstants.TABLE_FAMILY)
+        .setMaxVersions(conf.getInt(HConstants.HBASE_META_VERSIONS,
+          HConstants.DEFAULT_HBASE_META_VERSIONS))
+        .setInMemory(true)
+        .setBlocksize(8 * 1024)
+        .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
+        // Disable blooms for meta.  Needs work.  Seems to mess w/ getClosestOrBefore.
+        .setBloomFilterType(BloomType.NONE)
+        .build())
+      .setColumnFamily(ColumnFamilyDescriptorBuilder
+        .newBuilder(HConstants.REPLICATION_BARRIER_FAMILY)
+        .setMaxVersions(HConstants.ALL_VERSIONS)
+        .setInMemory(true)
+        .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
+        // Disable blooms for meta.  Needs work.  Seems to mess w/ getClosestOrBefore.
+        .setBloomFilterType(BloomType.NONE)
+        .build())
+      .setCoprocessor(CoprocessorDescriptorBuilder.newBuilder(
+        MultiRowMutationEndpoint.class.getName())
+        .setPriority(Coprocessor.PRIORITY_SYSTEM)
+        .build());
   }
 
   @VisibleForTesting
@@ -278,13 +260,13 @@ public class FSTableDescriptors implements TableDescriptors {
    * Returns a map from table name to table descriptor for all tables.
    */
   @Override
-  public Map<String, TableDescriptor> getAllDescriptors()
+  public Map<String, TableDescriptor> getAll()
   throws IOException {
     Map<String, TableDescriptor> tds = new TreeMap<>();
 
     if (fsvisited && usecache) {
       for (Map.Entry<TableName, TableDescriptor> entry: this.cache.entrySet()) {
-        tds.put(entry.getKey().toString(), entry.getValue());
+        tds.put(entry.getKey().getNameWithNamespaceInclAsString(), entry.getValue());
       }
       // add hbase:meta to the response
       tds.put(this.metaTableDescriptor.getTableName().getNameAsString(), metaTableDescriptor);
@@ -303,26 +285,12 @@ public class FSTableDescriptors implements TableDescriptors {
           allvisited = false;
           continue;
         } else {
-          tds.put(htd.getTableName().getNameAsString(), htd);
+          tds.put(htd.getTableName().getNameWithNamespaceInclAsString(), htd);
         }
         fsvisited = allvisited;
       }
     }
     return tds;
-  }
-
-  /**
-   * Returns a map from table name to table descriptor for all tables.
-   */
-  @Override
-  public Map<String, TableDescriptor> getAll() throws IOException {
-    Map<String, TableDescriptor> htds = new TreeMap<>();
-    Map<String, TableDescriptor> allDescriptors = getAllDescriptors();
-    for (Map.Entry<String, TableDescriptor> entry : allDescriptors
-        .entrySet()) {
-      htds.put(entry.getKey(), entry.getValue());
-    }
-    return htds;
   }
 
   /**

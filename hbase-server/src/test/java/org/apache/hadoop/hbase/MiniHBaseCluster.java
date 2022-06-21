@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.hbase.master.HMaster;
@@ -108,10 +109,6 @@ public class MiniHBaseCluster extends HBaseCluster {
          Class<? extends MiniHBaseCluster.MiniHBaseClusterRegionServer> regionserverClass)
       throws IOException, InterruptedException {
     super(conf);
-    conf.set(HConstants.MASTER_PORT, "0");
-    if (conf.getInt(HConstants.MASTER_INFO_PORT, 0) != -1) {
-      conf.set(HConstants.MASTER_INFO_PORT, "0");
-    }
 
     // Hadoop 2
     CompatibilityFactory.getInstance(MetricsAssertHelper.class).init();
@@ -272,7 +269,9 @@ public class MiniHBaseCluster extends HBaseCluster {
 
   @Override
   public void startRegionServer(String hostname, int port) throws IOException {
-    this.startRegionServer();
+    final Configuration newConf = HBaseConfiguration.create(conf);
+    newConf.setInt(HConstants.REGIONSERVER_PORT, port);
+    startRegionServer(newConf);
   }
 
   @Override
@@ -353,6 +352,31 @@ public class MiniHBaseCluster extends HBaseCluster {
   }
 
   @Override
+  public void startNameNode(ServerName serverName) throws IOException {
+    LOG.warn("Starting namenodes on mini cluster is not supported");
+  }
+
+  @Override
+  public void killNameNode(ServerName serverName) throws IOException {
+    LOG.warn("Aborting namenodes on mini cluster is not supported");
+  }
+
+  @Override
+  public void stopNameNode(ServerName serverName) throws IOException {
+    LOG.warn("Stopping namenodes on mini cluster is not supported");
+  }
+
+  @Override
+  public void waitForNameNodeToStart(ServerName serverName, long timeout) throws IOException {
+    LOG.warn("Waiting for namenodes to start on mini cluster is not supported");
+  }
+
+  @Override
+  public void waitForNameNodeToStop(ServerName serverName, long timeout) throws IOException {
+    LOG.warn("Waiting for namenodes to stop on mini cluster is not supported");
+  }
+
+  @Override
   public void startMaster(String hostname, int port) throws IOException {
     this.startMaster();
   }
@@ -382,12 +406,17 @@ public class MiniHBaseCluster extends HBaseCluster {
   public JVMClusterUtil.RegionServerThread startRegionServer()
       throws IOException {
     final Configuration newConf = HBaseConfiguration.create(conf);
+    return startRegionServer(newConf);
+  }
+
+  private JVMClusterUtil.RegionServerThread startRegionServer(Configuration configuration)
+      throws IOException {
     User rsUser =
-        HBaseTestingUtility.getDifferentUser(newConf, ".hfs."+index++);
+        HBaseTestingUtility.getDifferentUser(configuration, ".hfs."+index++);
     JVMClusterUtil.RegionServerThread t =  null;
     try {
       t = hbaseCluster.addRegionServer(
-          newConf, hbaseCluster.getRegionServers().size(), rsUser);
+          configuration, hbaseCluster.getRegionServers().size(), rsUser);
       t.start();
       t.waitForServerOnline();
     } catch (InterruptedException ie) {

@@ -90,7 +90,7 @@ public abstract class PressureAwareThroughputController extends Configured imple
     if (speed >= 1E15) { // large enough to say it is unlimited
       return "unlimited";
     } else {
-      return String.format("%.2f MB/sec", speed / 1024 / 1024);
+      return String.format("%.2f MB/second", speed / 1024 / 1024);
     }
   }
 
@@ -136,14 +136,6 @@ public abstract class PressureAwareThroughputController extends Configured imple
     operation.lastControlTime = EnvironmentEdgeManager.currentTime();
     return sleepTime;
   }
-
-  /**
-   * Check whether to skip control given delta size and control size
-   * @param deltaSize Delta size since last control
-   * @param controlSize Size limit to perform control
-   * @return a boolean indicates whether to skip this control
-   */
-  protected abstract boolean skipControl(long deltaSize, long controlSize);
 
   @Override
   public void finish(String opName) {

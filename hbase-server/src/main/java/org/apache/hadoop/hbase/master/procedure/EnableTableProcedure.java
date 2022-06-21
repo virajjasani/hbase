@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,22 +15,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase.master.procedure;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotDisabledException;
 import org.apache.hadoop.hbase.TableNotFoundException;
-import org.apache.yetus.audience.InterfaceAudience;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.RegionInfo;
@@ -42,6 +37,10 @@ import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.master.MasterCoprocessorHost;
 import org.apache.hadoop.hbase.master.TableStateManager;
 import org.apache.hadoop.hbase.procedure2.ProcedureStateSerializer;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.EnableTableState;
@@ -52,79 +51,68 @@ public class EnableTableProcedure
   private static final Logger LOG = LoggerFactory.getLogger(EnableTableProcedure.class);
 
   private TableName tableName;
-  private boolean skipTableStateCheck;
-
-  private Boolean traceEnabled = null;
 
   public EnableTableProcedure() {
-    super();
   }
 
   /**
    * Constructor
    * @param env MasterProcedureEnv
    * @param tableName the table to operate on
-   * @param skipTableStateCheck whether to check table state
    */
-  public EnableTableProcedure(final MasterProcedureEnv env, final TableName tableName,
-      final boolean skipTableStateCheck) {
-    this(env, tableName, skipTableStateCheck, null);
+  public EnableTableProcedure(MasterProcedureEnv env, TableName tableName) {
+    this(env, tableName, null);
   }
 
   /**
    * Constructor
    * @param env MasterProcedureEnv
    * @param tableName the table to operate on
-   * @param skipTableStateCheck whether to check table state
    */
-  public EnableTableProcedure(final MasterProcedureEnv env, final TableName tableName,
-      final boolean skipTableStateCheck, final ProcedurePrepareLatch syncLatch) {
+  public EnableTableProcedure(MasterProcedureEnv env, TableName tableName,
+      ProcedurePrepareLatch syncLatch) {
     super(env, syncLatch);
     this.tableName = tableName;
-    this.skipTableStateCheck = skipTableStateCheck;
   }
 
-  @SuppressWarnings("deprecation")
   @Override
   protected Flow executeFromState(final MasterProcedureEnv env, final EnableTableState state)
       throws InterruptedException {
-    if (isTraceEnabled()) {
-      LOG.trace(this + " execute state=" + state);
-    }
+    LOG.trace("{} execute state={}", this, state);
 
     try {
       switch (state) {
-      case ENABLE_TABLE_PREPARE:
-        if (prepareEnable(env)) {
-          setNextState(EnableTableState.ENABLE_TABLE_PRE_OPERATION);
-        } else {
-          assert isFailed() : "enable should have an exception here";
-          return Flow.NO_MORE_STATE;
-        }
-        break;
-      case ENABLE_TABLE_PRE_OPERATION:
-        preEnable(env, state);
-        setNextState(EnableTableState.ENABLE_TABLE_SET_ENABLING_TABLE_STATE);
-        break;
-      case ENABLE_TABLE_SET_ENABLING_TABLE_STATE:
-        setTableStateToEnabling(env, tableName);
-        setNextState(EnableTableState.ENABLE_TABLE_MARK_REGIONS_ONLINE);
-        break;
-      case ENABLE_TABLE_MARK_REGIONS_ONLINE:
-        Connection connection = env.getMasterServices().getConnection();
-        // we will need to get the tableDescriptor here to see if there is a change in the replica
-        // count
-        TableDescriptor hTableDescriptor =
-            env.getMasterServices().getTableDescriptors().get(tableName);
+        case ENABLE_TABLE_PREPARE:
+          if (prepareEnable(env)) {
+            setNextState(EnableTableState.ENABLE_TABLE_PRE_OPERATION);
+          } else {
+            assert isFailed() : "enable should have an exception here";
+            return Flow.NO_MORE_STATE;
+          }
+          break;
+        case ENABLE_TABLE_PRE_OPERATION:
+          preEnable(env, state);
+          setNextState(EnableTableState.ENABLE_TABLE_SET_ENABLING_TABLE_STATE);
+          break;
+        case ENABLE_TABLE_SET_ENABLING_TABLE_STATE:
+          setTableStateToEnabling(env, tableName);
+          setNextState(EnableTableState.ENABLE_TABLE_MARK_REGIONS_ONLINE);
+          break;
+        case ENABLE_TABLE_MARK_REGIONS_ONLINE:
+          Connection connection = env.getMasterServices().getConnection();
+          // we will need to get the tableDescriptor here to see if there is a change in the replica
+          // count
+          TableDescriptor hTableDescriptor =
+              env.getMasterServices().getTableDescriptors().get(tableName);
 
-        // Get the replica count
-        int regionReplicaCount = hTableDescriptor.getRegionReplication();
+          // Get the replica count
+          int regionReplicaCount = hTableDescriptor.getRegionReplication();
 
-        // Get the regions for the table from memory; get both online and offline regions ('true').
-        List<RegionInfo> regionsOfTable =
-            env.getAssignmentManager().getRegionStates().getRegionsOfTable(tableName, true);
+          // Get the regions for the table from memory; get both online and offline regions
+          // ('true').
+          List<RegionInfo> regionsOfTable =
+              env.getAssignmentManager().getRegionStates().getRegionsOfTable(tableName, true);
 
-        if (regionReplicaCount > 1) {
           int currentMaxReplica = 0;
           // Check if the regions in memory have replica regions as marked in META table
           for (RegionInfo regionInfo : regionsOfTable) {
@@ -166,36 +154,33 @@ public class EnableTableProcedure
             }
           } else {
             // the replicasFound is less than the regionReplication
-            LOG.info(
-              "The number of replicas has been changed(increased)."
-              + " Lets assign the new region replicas. The previous replica count was "
-                  + (currentMaxReplica + 1) + ". The current replica count is "
-                  + regionReplicaCount);
+            LOG.info("The number of replicas has been changed(increased)."
+                + " Lets assign the new region replicas. The previous replica count was "
+                + (currentMaxReplica + 1) + ". The current replica count is " + regionReplicaCount);
             regionsOfTable = RegionReplicaUtil.addReplicas(hTableDescriptor, regionsOfTable,
               currentMaxReplica + 1, regionReplicaCount);
           }
-        }
-        // Assign all the table regions. (including region replicas if added).
-        // createAssignProcedure will try to retain old assignments if possible.
-        addChildProcedure(env.getAssignmentManager().createAssignProcedures(regionsOfTable));
-        setNextState(EnableTableState.ENABLE_TABLE_SET_ENABLED_TABLE_STATE);
-        break;
-      case ENABLE_TABLE_SET_ENABLED_TABLE_STATE:
-        setTableStateToEnabled(env, tableName);
-        setNextState(EnableTableState.ENABLE_TABLE_POST_OPERATION);
-        break;
-      case ENABLE_TABLE_POST_OPERATION:
-        postEnable(env, state);
-        return Flow.NO_MORE_STATE;
-      default:
-        throw new UnsupportedOperationException("unhandled state=" + state);
+          // Assign all the table regions. (including region replicas if added).
+          // createAssignProcedure will try to retain old assignments if possible.
+          addChildProcedure(env.getAssignmentManager().createAssignProcedures(regionsOfTable));
+          setNextState(EnableTableState.ENABLE_TABLE_SET_ENABLED_TABLE_STATE);
+          break;
+        case ENABLE_TABLE_SET_ENABLED_TABLE_STATE:
+          setTableStateToEnabled(env, tableName);
+          setNextState(EnableTableState.ENABLE_TABLE_POST_OPERATION);
+          break;
+        case ENABLE_TABLE_POST_OPERATION:
+          postEnable(env, state);
+          return Flow.NO_MORE_STATE;
+        default:
+          throw new UnsupportedOperationException("unhandled state=" + state);
       }
     } catch (IOException e) {
       if (isRollbackSupported(state)) {
         setFailure("master-enable-table", e);
       } else {
-        LOG.warn("Retriable error trying to enable table=" + tableName +
-          " (in state=" + state + ")", e);
+        LOG.warn(
+          "Retriable error trying to enable table=" + tableName + " (in state=" + state + ")", e);
       }
     }
     return Flow.HAS_MORE_STATE;
@@ -258,7 +243,7 @@ public class EnableTableProcedure
 
   @Override
   protected EnableTableState getState(final int stateId) {
-    return EnableTableState.valueOf(stateId);
+    return EnableTableState.forNumber(stateId);
   }
 
   @Override
@@ -272,29 +257,27 @@ public class EnableTableProcedure
   }
 
   @Override
-  protected void serializeStateData(ProcedureStateSerializer serializer)
-      throws IOException {
+  protected void serializeStateData(ProcedureStateSerializer serializer) throws IOException {
     super.serializeStateData(serializer);
 
+    // the skipTableStateCheck is false so we still need to set it...
+    @SuppressWarnings("deprecation")
     MasterProcedureProtos.EnableTableStateData.Builder enableTableMsg =
-        MasterProcedureProtos.EnableTableStateData.newBuilder()
-            .setUserInfo(MasterProcedureUtil.toProtoUserInfo(getUser()))
-            .setTableName(ProtobufUtil.toProtoTableName(tableName))
-            .setSkipTableStateCheck(skipTableStateCheck);
+      MasterProcedureProtos.EnableTableStateData.newBuilder()
+        .setUserInfo(MasterProcedureUtil.toProtoUserInfo(getUser()))
+        .setTableName(ProtobufUtil.toProtoTableName(tableName)).setSkipTableStateCheck(false);
 
     serializer.serialize(enableTableMsg.build());
   }
 
   @Override
-  protected void deserializeStateData(ProcedureStateSerializer serializer)
-      throws IOException {
+  protected void deserializeStateData(ProcedureStateSerializer serializer) throws IOException {
     super.deserializeStateData(serializer);
 
     MasterProcedureProtos.EnableTableStateData enableTableMsg =
-        serializer.deserialize(MasterProcedureProtos.EnableTableStateData.class);
+      serializer.deserialize(MasterProcedureProtos.EnableTableStateData.class);
     setUser(MasterProcedureUtil.toUserInfo(enableTableMsg.getUserInfo()));
     tableName = ProtobufUtil.toTableName(enableTableMsg.getTableName());
-    skipTableStateCheck = enableTableMsg.getSkipTableStateCheck();
   }
 
   @Override
@@ -322,7 +305,7 @@ public class EnableTableProcedure
     if (!MetaTableAccessor.tableExists(env.getMasterServices().getConnection(), tableName)) {
       setFailure("master-enable-table", new TableNotFoundException(tableName));
       canTableBeEnabled = false;
-    } else if (!skipTableStateCheck) {
+    } else {
       // There could be multiple client requests trying to disable or enable
       // the table at the same time. Ensure only the first request is honored
       // After that, no other requests can be accepted until the table reaches
@@ -333,11 +316,10 @@ public class EnableTableProcedure
       // was implemented. With table lock, there is no need to set the state here (it will
       // set the state later on). A quick state check should be enough for us to move forward.
       TableStateManager tsm = env.getMasterServices().getTableStateManager();
-      TableState.State state = tsm.getTableState(tableName);
-      if(!state.equals(TableState.State.DISABLED)){
-        LOG.info("Table " + tableName + " isn't disabled;is "+state.name()+"; skipping enable");
-        setFailure("master-enable-table", new TableNotDisabledException(
-                this.tableName+" state is "+state.name()));
+      TableState ts = tsm.getTableState(tableName);
+      if(!ts.isDisabled()){
+        LOG.info("Not DISABLED tableState={}; skipping enable; {}", ts.getState(), this);
+        setFailure("master-enable-table", new TableNotDisabledException(ts.toString()));
         canTableBeEnabled = false;
       }
     }
@@ -401,18 +383,6 @@ public class EnableTableProcedure
   private void postEnable(final MasterProcedureEnv env, final EnableTableState state)
       throws IOException, InterruptedException {
     runCoprocessorAction(env, state);
-  }
-
-  /**
-   * The procedure could be restarted from a different machine. If the variable is null, we need to
-   * retrieve it.
-   * @return traceEnabled
-   */
-  private Boolean isTraceEnabled() {
-    if (traceEnabled == null) {
-      traceEnabled = LOG.isTraceEnabled();
-    }
-    return traceEnabled;
   }
 
   /**

@@ -22,15 +22,16 @@ import static org.junit.Assert.assertEquals;
 import java.io.IOException;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.UUID;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
-import org.junit.*;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.ClassRule;
+import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -118,9 +119,9 @@ public class TestFSVisitor {
         Path familyDir = new Path(regionDir, familyName);
         fs.mkdirs(familyDir);
         for (int h = 0; h < 5; ++h) {
-         String hfileName = UUID.randomUUID().toString().replaceAll("-", "");
-         tableHFiles.add(hfileName);
-         fs.createNewFile(new Path(familyDir, hfileName));
+          String hfileName = TEST_UTIL.getRandomUUID().toString().replaceAll("-", "");
+          tableHFiles.add(hfileName);
+          fs.createNewFile(new Path(familyDir, hfileName));
         }
       }
     }

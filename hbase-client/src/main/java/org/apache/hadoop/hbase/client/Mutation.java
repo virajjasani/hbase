@@ -37,6 +37,7 @@ import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.ExtendedCell;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.IndividualBytesFieldCell;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.RawCell;
@@ -66,7 +67,7 @@ public abstract class Mutation extends OperationWithAttributes implements Row, C
     HeapSize {
   public static final long MUTATION_OVERHEAD = ClassSize.align(
       // This
-      (long)ClassSize.OBJECT +
+      ClassSize.OBJECT +
       // row + OperationWithAttributes.attributes
       2 * ClassSize.REFERENCE +
       // Timestamp
@@ -113,12 +114,11 @@ public abstract class Mutation extends OperationWithAttributes implements Row, C
   protected Mutation(Mutation clone) {
     super(clone);
     this.row = clone.getRow();
-    this.ts = clone.getTimeStamp();
-    this.familyMap = clone.getFamilyCellMap().entrySet().stream()
-      .collect(Collectors.toMap(e -> e.getKey(), e -> new ArrayList<>(e.getValue()),
-        (k, v) -> {
-          throw new RuntimeException("collisions!!!");
-        }, () -> new TreeMap(Bytes.BYTES_COMPARATOR)));
+    this.ts = clone.getTimestamp();
+    this.familyMap = clone.getFamilyCellMap().entrySet().stream().
+      collect(Collectors.toMap(e -> e.getKey(), e -> new ArrayList<>(e.getValue()), (k, v) -> {
+        throw new RuntimeException("collisions!!!");
+      }, () -> new TreeMap<>(Bytes.BYTES_COMPARATOR)));
   }
 
   /**
@@ -344,8 +344,20 @@ public abstract class Mutation extends OperationWithAttributes implements Row, C
   /**
    * Method for retrieving the timestamp
    * @return timestamp
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *             Use {@link #getTimestamp()} instead
    */
+  @Deprecated
   public long getTimeStamp() {
+    return this.getTimestamp();
+  }
+
+  /**
+   * Method for retrieving the timestamp.
+   *
+   * @return timestamp
+   */
+  public long getTimestamp() {
     return this.ts;
   }
 
@@ -487,8 +499,8 @@ public abstract class Mutation extends OperationWithAttributes implements Row, C
       heapsize += ClassSize.align(ClassSize.ARRAY +
           size * ClassSize.REFERENCE);
 
-      for(Cell cell : entry.getValue()) {
-        heapsize += PrivateCellUtil.estimatedHeapSizeOf(cell);
+      for (Cell cell : entry.getValue()) {
+        heapsize += cell.heapSize();
       }
     }
     heapsize += getAttributeSize();
@@ -776,11 +788,18 @@ public abstract class Mutation extends OperationWithAttributes implements Row, C
         " doesn't match the original one " +  Bytes.toStringBinary(this.row));
     }
 
-    if (cell.getFamilyArray() == null || cell.getFamilyLength() == 0) {
+    byte[] family;
+
+    if (cell instanceof IndividualBytesFieldCell) {
+      family = cell.getFamilyArray();
+    } else {
+      family = CellUtil.cloneFamily(cell);
+    }
+
+    if (family == null || family.length == 0) {
       throw new IllegalArgumentException("Family cannot be null");
     }
 
-    byte[] family = CellUtil.cloneFamily(cell);
     if (cell instanceof ExtendedCell) {
       getCellList(family).add(cell);
     } else {
@@ -791,10 +810,10 @@ public abstract class Mutation extends OperationWithAttributes implements Row, C
 
   private static final class CellWrapper implements ExtendedCell {
     private static final long FIXED_OVERHEAD = ClassSize.align(
-          (long)ClassSize.OBJECT              // object header
+      ClassSize.OBJECT              // object header
         + KeyValue.TIMESTAMP_SIZE       // timestamp
         + Bytes.SIZEOF_LONG             // sequence id
-        + 1L * ClassSize.REFERENCE);     // references to cell
+        + 1 * ClassSize.REFERENCE);     // references to cell
     private final Cell cell;
     private long sequenceId;
     private long timestamp;

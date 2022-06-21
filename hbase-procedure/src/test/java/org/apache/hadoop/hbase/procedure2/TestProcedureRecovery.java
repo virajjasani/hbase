@@ -47,7 +47,6 @@ import org.apache.hbase.thirdparty.com.google.protobuf.Int32Value;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestProcedureRecovery {
-
   @ClassRule
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestProcedureRecovery.class);
@@ -76,10 +75,10 @@ public class TestProcedureRecovery {
     logDir = new Path(testDir, "proc-logs");
     procEnv = new TestProcEnv();
     procStore = ProcedureTestingUtility.createStore(htu.getConfiguration(), logDir);
-    procExecutor = new ProcedureExecutor(htu.getConfiguration(), procEnv, procStore);
+    procExecutor = new ProcedureExecutor<>(htu.getConfiguration(), procEnv, procStore);
     procExecutor.testing = new ProcedureExecutor.Testing();
     procStore.start(PROCEDURE_EXECUTOR_SLOTS);
-    procExecutor.start(PROCEDURE_EXECUTOR_SLOTS, true);
+    ProcedureTestingUtility.initAndStartWorkers(procExecutor, PROCEDURE_EXECUTOR_SLOTS, true);
     procSleepInterval = 0;
   }
 
@@ -114,7 +113,9 @@ public class TestProcedureRecovery {
     protected void rollback(TestProcEnv env) { }
 
     @Override
-    protected boolean abort(TestProcEnv env) { return true; }
+    protected boolean abort(TestProcEnv env) {
+      return true;
+    }
   }
 
   public static class BaseTestStepProcedure extends SequentialProcedure<TestProcEnv> {

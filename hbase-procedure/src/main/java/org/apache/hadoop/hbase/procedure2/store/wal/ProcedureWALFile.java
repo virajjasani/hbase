@@ -15,20 +15,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase.procedure2.store.wal;
 
 import java.io.IOException;
-
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.procedure2.store.ProcedureStoreTracker;
 import org.apache.yetus.audience.InterfaceAudience;
-import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.apache.hadoop.hbase.procedure2.store.ProcedureStoreTracker;
+
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureWALHeader;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureWALTrailer;
@@ -37,7 +35,6 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.Procedu
  * Describes a WAL File
  */
 @InterfaceAudience.Private
-@InterfaceStability.Evolving
 public class ProcedureWALFile implements Comparable<ProcedureWALFile> {
   private static final Logger LOG = LoggerFactory.getLogger(ProcedureWALFile.class);
 
@@ -114,7 +111,10 @@ public class ProcedureWALFile implements Comparable<ProcedureWALFile> {
   }
 
   public void close() {
-    if (stream == null) return;
+    if (stream == null) {
+      return;
+    }
+
     try {
       stream.close();
     } catch (IOException e) {
@@ -195,8 +195,14 @@ public class ProcedureWALFile implements Comparable<ProcedureWALFile> {
 
   @Override
   public boolean equals(Object o) {
-    if (this == o) return true;
-    if (!(o instanceof ProcedureWALFile)) return false;
+    if (this == o) {
+      return true;
+    }
+
+    if (!(o instanceof ProcedureWALFile)) {
+      return false;
+    }
+
     return compareTo((ProcedureWALFile)o) == 0;
   }
 

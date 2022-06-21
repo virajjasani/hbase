@@ -24,12 +24,15 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.DelayQueue;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
+import org.apache.hadoop.hbase.util.FutureUtils;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.zookeeper.KeeperException;
@@ -124,13 +127,19 @@ public final class ReadOnlyZKClient implements Closeable {
   }
 
   public ReadOnlyZKClient(Configuration conf) {
-    this.connectString = ZKConfig.getZKQuorumServersString(conf);
+    // We might use a different ZK for client access
+    String clientZkQuorumServers = ZKConfig.getClientZKQuorumServersString(conf);
+    if (clientZkQuorumServers != null) {
+      this.connectString = clientZkQuorumServers;
+    } else {
+      this.connectString = ZKConfig.getZKQuorumServersString(conf);
+    }
     this.sessionTimeoutMs = conf.getInt(ZK_SESSION_TIMEOUT, DEFAULT_ZK_SESSION_TIMEOUT);
     this.maxRetries = conf.getInt(RECOVERY_RETRY, DEFAULT_RECOVERY_RETRY);
     this.retryIntervalMs =
         conf.getInt(RECOVERY_RETRY_INTERVAL_MILLIS, DEFAULT_RECOVERY_RETRY_INTERVAL_MILLIS);
     this.keepAliveTimeMs = conf.getInt(KEEPALIVE_MILLIS, DEFAULT_KEEPALIVE_MILLIS);
-    LOG.info(
+    LOG.debug(
       "Connect {} to {} with session timeout={}ms, retries {}, " +
         "retry interval {}ms, keepAlive={}ms",
       getId(), connectString, sessionTimeoutMs, maxRetries, retryIntervalMs, keepAliveTimeMs);
@@ -245,15 +254,9 @@ public final class ReadOnlyZKClient implements Closeable {
     }
   }
 
-  private static <T> CompletableFuture<T> failed(Throwable e) {
-    CompletableFuture<T> future = new CompletableFuture<>();
-    future.completeExceptionally(e);
-    return future;
-  }
-
   public CompletableFuture<byte[]> get(String path) {
     if (closed.get()) {
-      return failed(new IOException("Client already closed"));
+      return FutureUtils.failedFuture(new DoNotRetryIOException("Client already closed"));
     }
     CompletableFuture<byte[]> future = new CompletableFuture<>();
     tasks.add(new ZKTask<byte[]>(path, future, "get") {
@@ -269,7 +272,7 @@ public final class ReadOnlyZKClient implements Closeable {
 
   public CompletableFuture<Stat> exists(String path) {
     if (closed.get()) {
-      return failed(new IOException("Client already closed"));
+      return FutureUtils.failedFuture(new DoNotRetryIOException("Client already closed"));
     }
     CompletableFuture<Stat> future = new CompletableFuture<>();
     tasks.add(new ZKTask<Stat>(path, future, "exists") {
@@ -277,6 +280,22 @@ public final class ReadOnlyZKClient implements Closeable {
       @Override
       protected void doExec(ZooKeeper zk) {
         zk.exists(path, false, (rc, path, ctx, stat) -> onComplete(zk, rc, stat, false), null);
+      }
+    });
+    return future;
+  }
+
+  public CompletableFuture<List<String>> list(String path) {
+    if (closed.get()) {
+      return FutureUtils.failedFuture(new DoNotRetryIOException("Client already closed"));
+    }
+    CompletableFuture<List<String>> future = new CompletableFuture<>();
+    tasks.add(new ZKTask<List<String>>(path, future, "list") {
+
+      @Override
+      protected void doExec(ZooKeeper zk) {
+        zk.getChildren(path, false, (rc, path, ctx, children) -> onComplete(zk, rc, children, true),
+          null);
       }
     });
     return future;
@@ -313,7 +332,7 @@ public final class ReadOnlyZKClient implements Closeable {
       }
       if (task == null) {
         if (pendingRequests == 0) {
-          LOG.debug("{} to {} inactive for {}ms; closing (Will reconnect when new requests)",
+          LOG.trace("{} to {} inactive for {}ms; closing (Will reconnect when new requests)",
             getId(), connectString, keepAliveTimeMs);
           closeZk();
         }
@@ -333,7 +352,7 @@ public final class ReadOnlyZKClient implements Closeable {
       }
     }
     closeZk();
-    IOException error = new IOException("Client already closed");
+    DoNotRetryIOException error = new DoNotRetryIOException("Client already closed");
     Arrays.stream(tasks.toArray(new Task[0])).forEach(t -> t.closed(error));
     tasks.clear();
   }
@@ -341,7 +360,7 @@ public final class ReadOnlyZKClient implements Closeable {
   @Override
   public void close() {
     if (closed.compareAndSet(false, true)) {
-      LOG.info("Close zookeeper connection {} to {}", getId(), connectString);
+      LOG.debug("Close zookeeper connection {} to {}", getId(), connectString);
       tasks.add(CLOSE);
     }
   }

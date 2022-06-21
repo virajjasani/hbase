@@ -41,18 +41,22 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.MemoryCompactionPolicy;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.Waiter.ExplainingPredicate;
 import org.apache.hadoop.hbase.io.ByteBufferPool;
 import org.apache.hadoop.hbase.regionserver.CompactingMemStore;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.RetryCounter;
 import org.apache.hadoop.hbase.util.Threads;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Will split the table, and move region randomly when testing.
@@ -62,7 +66,9 @@ public class TestAsyncTableGetMultiThreaded {
 
   @ClassRule
   public static final HBaseClassTestRule CLASS_RULE =
-      HBaseClassTestRule.forClass(TestAsyncTableGetMultiThreaded.class);
+    HBaseClassTestRule.forClass(TestAsyncTableGetMultiThreaded.class);
+
+  private static final Logger LOG = LoggerFactory.getLogger(TestAsyncTableGetMultiThreaded.class);
 
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
 
@@ -120,11 +126,14 @@ public class TestAsyncTableGetMultiThreaded {
         assertEquals(i, Bytes.toInt(TABLE.get(new Get(Bytes.toBytes(String.format("%03d", i))))
             .get().getValue(FAMILY, QUALIFIER)));
       }
+      // sleep a bit so we do not add to much load to the test machine as we have 20 threads here
+      Thread.sleep(10);
     }
   }
 
   @Test
-  public void test() throws IOException, InterruptedException, ExecutionException {
+  public void test() throws Exception {
+    LOG.info("====== Test started ======");
     int numThreads = 20;
     AtomicBoolean stop = new AtomicBoolean(false);
     ExecutorService executor =
@@ -134,28 +143,79 @@ public class TestAsyncTableGetMultiThreaded {
       run(stop);
       return null;
     })));
+    LOG.info("====== Scheduled {} read threads ======", numThreads);
     Collections.shuffle(Arrays.asList(SPLIT_KEYS), new Random(123));
     Admin admin = TEST_UTIL.getAdmin();
     for (byte[] splitPoint : SPLIT_KEYS) {
+      int oldRegionCount = admin.getRegions(TABLE_NAME).size();
+      LOG.info("====== Splitting at {} ======, region count before splitting is {}",
+        Bytes.toStringBinary(splitPoint), oldRegionCount);
       admin.split(TABLE_NAME, splitPoint);
-      for (HRegion region : TEST_UTIL.getHBaseCluster().getRegions(TABLE_NAME)) {
+      TEST_UTIL.waitFor(30000, new ExplainingPredicate<Exception>() {
+        @Override
+        public boolean evaluate() throws Exception {
+          return TEST_UTIL.getMiniHBaseCluster().getRegions(TABLE_NAME).size() > oldRegionCount;
+        }
+
+        @Override
+        public String explainFailure() throws Exception {
+          return "Split has not finished yet";
+        }
+      });
+      List<HRegion> regions = TEST_UTIL.getMiniHBaseCluster().getRegions(TABLE_NAME);
+      LOG.info("====== Split at {} ======, region count after splitting is {}",
+        Bytes.toStringBinary(splitPoint), regions.size());
+      for (HRegion region : regions) {
+        LOG.info("====== Compact {} ======", region.getRegionInfo());
         region.compact(true);
       }
+      for (HRegion region : regions) {
+        // Waiting for compaction to complete and references are cleaned up
+        LOG.info("====== Waiting for compaction on {} ======", region.getRegionInfo());
+        RetryCounter retrier = new RetryCounter(30, 1, TimeUnit.SECONDS);
+        for (;;) {
+          try {
+            if (admin.getCompactionStateForRegion(
+              region.getRegionInfo().getRegionName()) == CompactionState.NONE) {
+              break;
+            }
+          } catch (IOException e) {
+            LOG.warn("Failed to query");
+          }
+          if (!retrier.shouldRetry()) {
+            throw new IOException("Can not finish compaction in time after attempt " +
+              retrier.getAttemptTimes() + " times");
+          }
+          retrier.sleepUntilNextRetry();
+        }
+        LOG.info("====== Compaction on {} finished, close and archive compacted files ======",
+          region.getRegionInfo());
+        region.getStores().get(0).closeAndArchiveCompactedFiles();
+        LOG.info("====== Close and archive compacted files on {} done ======",
+          region.getRegionInfo());
+      }
       Thread.sleep(5000);
+      LOG.info("====== Balancing cluster ======");
       admin.balance(true);
+      LOG.info("====== Balance cluster done ======");
       Thread.sleep(5000);
       ServerName metaServer = TEST_UTIL.getHBaseCluster().getServerHoldingMeta();
       ServerName newMetaServer = TEST_UTIL.getHBaseCluster().getRegionServerThreads().stream()
           .map(t -> t.getRegionServer().getServerName()).filter(s -> !s.equals(metaServer))
           .findAny().get();
-      admin.move(RegionInfoBuilder.FIRST_META_REGIONINFO.getEncodedNameAsBytes(),
-        Bytes.toBytes(newMetaServer.getServerName()));
+      LOG.info("====== Moving meta from {} to {} ======", metaServer, newMetaServer);
+      admin.move(RegionInfoBuilder.FIRST_META_REGIONINFO.getEncodedNameAsBytes(), newMetaServer);
+      LOG.info("====== Move meta done ======");
       Thread.sleep(5000);
     }
+    LOG.info("====== Read test finished, shutdown thread pool ======");
     stop.set(true);
     executor.shutdown();
-    for (Future<?> future : futures) {
-      future.get();
+    for (int i = 0; i < numThreads; i++) {
+      LOG.info("====== Waiting for {} threads to finish, remaining {} ======", numThreads,
+        numThreads - i);
+      futures.get(i).get();
     }
+    LOG.info("====== Test test finished ======");
   }
 }

@@ -1,5 +1,4 @@
 /**
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -16,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase.regionserver.wal;
 
 import java.io.IOException;
@@ -25,15 +23,16 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.yetus.audience.InterfaceAudience;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.WALHeader;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.WALTrailer;
 import org.apache.hadoop.hbase.util.CommonFSUtils;
 import org.apache.hadoop.hbase.util.CommonFSUtils.StreamLacksCapabilityException;
 import org.apache.hadoop.hbase.wal.FSHLogProvider;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.WALHeader;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.WALTrailer;
 
 /**
  * Writer for protobuf-based WAL.
@@ -48,7 +47,6 @@ public class ProtobufLogWriter extends AbstractProtobufLogWriter
 
   @Override
   public void append(Entry entry) throws IOException {
-    entry.setCompressionContext(compressionContext);
     entry.getKey().getBuilder(compressor).
         setFollowingKvCount(entry.getEdit().size()).build().writeDelimitedTo(output);
     for (Cell cell : entry.getEdit().getCells()) {
@@ -62,7 +60,9 @@ public class ProtobufLogWriter extends AbstractProtobufLogWriter
   public void close() throws IOException {
     if (this.output != null) {
       try {
-        if (!trailerWritten) writeWALTrailer();
+        if (!trailerWritten) {
+          writeWALTrailer();
+        }
         this.output.close();
       } catch (NullPointerException npe) {
         // Can get a NPE coming up from down in DFSClient$DFSOutputStream#close
@@ -73,11 +73,17 @@ public class ProtobufLogWriter extends AbstractProtobufLogWriter
   }
 
   @Override
-  public void sync() throws IOException {
+  public void sync(boolean forceSync) throws IOException {
     FSDataOutputStream fsdos = this.output;
-    if (fsdos == null) return; // Presume closed
+    if (fsdos == null) {
+      return; // Presume closed
+    }
     fsdos.flush();
-    fsdos.hflush();
+    if (forceSync) {
+      fsdos.hsync();
+    } else {
+      fsdos.hflush();
+    }
   }
 
   public FSDataOutputStream getStream() {
@@ -88,12 +94,15 @@ public class ProtobufLogWriter extends AbstractProtobufLogWriter
   @Override
   protected void initOutput(FileSystem fs, Path path, boolean overwritable, int bufferSize,
       short replication, long blockSize) throws IOException, StreamLacksCapabilityException {
-    this.output = fs.createNonRecursive(path, overwritable, bufferSize, replication, blockSize,
-      null);
-    // TODO Be sure to add a check for hsync if this branch includes HBASE-19024
-    if (fs.getConf().getBoolean(CommonFSUtils.UNSAFE_STREAM_CAPABILITY_ENFORCE, true) &&
-        !(CommonFSUtils.hasCapability(output, "hflush"))) {
-      throw new StreamLacksCapabilityException("hflush");
+    this.output = CommonFSUtils.createForWal(fs, path, overwritable, bufferSize, replication,
+        blockSize, false);
+    if (fs.getConf().getBoolean(CommonFSUtils.UNSAFE_STREAM_CAPABILITY_ENFORCE, true)) {
+      if (!CommonFSUtils.hasCapability(output, "hflush")) {
+        throw new StreamLacksCapabilityException("hflush");
+      }
+      if (!CommonFSUtils.hasCapability(output, "hsync")) {
+        throw new StreamLacksCapabilityException("hsync");
+      }
     }
   }
 

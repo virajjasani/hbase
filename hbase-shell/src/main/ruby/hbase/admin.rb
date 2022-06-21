@@ -29,6 +29,7 @@ java_import org.apache.hadoop.hbase.TableName
 # Wrapper for org.apache.hadoop.hbase.client.HBaseAdmin
 
 module Hbase
+  # rubocop:disable Metrics/ClassLength
   class Admin
     include HBaseConstants
 
@@ -36,6 +37,7 @@ module Hbase
       @connection = connection
       # Java Admin instance
       @admin = @connection.getAdmin
+      @hbck = @connection.getHbck
       @conf = @connection.getConfiguration
     end
 
@@ -50,12 +52,17 @@ module Hbase
     end
 
     #----------------------------------------------------------------------------------------------
-    # Requests a table or region flush
-    def flush(table_or_region_name)
-      @admin.flushRegion(table_or_region_name.to_java_bytes)
-    rescue java.lang.IllegalArgumentException => e
+    # Requests a table or region or region server flush
+    def flush(name)
+      @admin.flushRegion(name.to_java_bytes)
+    rescue java.lang.IllegalArgumentException
       # Unknown region. Try table.
-      @admin.flush(TableName.valueOf(table_or_region_name))
+      begin
+        @admin.flush(TableName.valueOf(name))
+      rescue java.lang.IllegalArgumentException
+        # Unknown table. Try region server.
+        @admin.flushRegionServer(ServerName.valueOf(name))
+      end
     end
 
     #----------------------------------------------------------------------------------------------
@@ -77,6 +84,19 @@ module Hbase
       rescue java.lang.IllegalArgumentException => e
         @admin.compact(TableName.valueOf(table_or_region_name), family_bytes, compact_type)
       end
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # Switch compaction on/off at runtime on a region server
+    def compaction_switch(on_or_off, regionserver_names)
+      region_servers = regionserver_names.flatten.compact
+      servers = java.util.ArrayList.new
+      if region_servers.any?
+        region_servers.each do |s|
+          servers.add(s)
+        end
+      end
+      @admin.compactionSwitch(java.lang.Boolean.valueOf(on_or_off), servers)
     end
 
     #----------------------------------------------------------------------------------------------
@@ -137,9 +157,9 @@ module Hbase
     def splitormerge_switch(type, enabled)
       switch_type = nil
       if type == 'SPLIT'
-        switch_type = org.apache.hadoop.hbase.client.Admin::MasterSwitchType::SPLIT
+        switch_type = org.apache.hadoop.hbase.client::MasterSwitchType::SPLIT
       elsif type == 'MERGE'
-        switch_type = org.apache.hadoop.hbase.client.Admin::MasterSwitchType::MERGE
+        switch_type = org.apache.hadoop.hbase.client::MasterSwitchType::MERGE
       else
         raise ArgumentError, 'only SPLIT or MERGE accepted for type!'
       end
@@ -155,9 +175,9 @@ module Hbase
     def splitormerge_enabled(type)
       switch_type = nil
       if type == 'SPLIT'
-        switch_type = org.apache.hadoop.hbase.client.Admin::MasterSwitchType::SPLIT
+        switch_type = org.apache.hadoop.hbase.client::MasterSwitchType::SPLIT
       elsif type == 'MERGE'
-        switch_type = org.apache.hadoop.hbase.client.Admin::MasterSwitchType::MERGE
+        switch_type = org.apache.hadoop.hbase.client::MasterSwitchType::MERGE
       else
         raise ArgumentError, 'only SPLIT or MERGE accepted for type!'
       end
@@ -231,6 +251,12 @@ module Hbase
     end
 
     #----------------------------------------------------------------------------------------------
+    # Request HBCK chore to run
+    def hbck_chore_run
+      @hbck.runHbckChore
+    end
+
+    #----------------------------------------------------------------------------------------------
     # Request a scan of the catalog table (for garbage collection)
     # Returns an int signifying the number of entries cleaned
     def catalogjanitor_run
@@ -282,8 +308,17 @@ module Hbase
     #----------------------------------------------------------------------------------------------
     # Enables all tables matching the given regex
     def enable_all(regex)
-      regex = regex.to_s
-      @admin.enableTables(Pattern.compile(regex))
+      pattern = Pattern.compile(regex.to_s)
+      failed = java.util.ArrayList.new
+      @admin.listTableNames(pattern).each do |table_name|
+        begin
+          @admin.enableTable(table_name)
+        rescue java.io.IOException => e
+          puts "table:#{table_name}, error:#{e.toString}"
+          failed.add(table_name)
+        end
+      end
+      failed
     end
 
     #----------------------------------------------------------------------------------------------
@@ -298,7 +333,16 @@ module Hbase
     # Disables all tables matching the given regex
     def disable_all(regex)
       pattern = Pattern.compile(regex.to_s)
-      @admin.disableTables(pattern).map { |t| t.getTableName.getNameAsString }
+      failed = java.util.ArrayList.new
+      @admin.listTableNames(pattern).each do |table_name|
+        begin
+          @admin.disableTable(table_name)
+        rescue java.io.IOException => e
+          puts "table:#{table_name}, error:#{e.toString}"
+          failed.add(table_name)
+        end
+      end
+      failed
     end
 
     #---------------------------------------------------------------------------------------------
@@ -328,7 +372,15 @@ module Hbase
     # Drops a table
     def drop_all(regex)
       pattern = Pattern.compile(regex.to_s)
-      failed = @admin.deleteTables(pattern).map { |t| t.getTableName.getNameAsString }
+      failed = java.util.ArrayList.new
+      @admin.listTableNames(pattern).each do |table_name|
+        begin
+          @admin.deleteTable(table_name)
+        rescue java.io.IOException => e
+          puts puts "table:#{table_name}, error:#{e.toString}"
+          failed.add(table_name)
+        end
+      end
       failed
     end
 
@@ -463,8 +515,10 @@ module Hbase
 
     #----------------------------------------------------------------------------------------------
     # Merge two regions
-    def merge_region(encoded_region_a_name, encoded_region_b_name, force)
-      @admin.mergeRegions(encoded_region_a_name.to_java_bytes, encoded_region_b_name.to_java_bytes, java.lang.Boolean.valueOf(force))
+    def merge_region(region_a_name, region_b_name, force)
+      @admin.mergeRegions(region_a_name.to_java_bytes,
+                          region_b_name.to_java_bytes,
+                          java.lang.Boolean.valueOf(force))
     end
 
     #----------------------------------------------------------------------------------------------
@@ -577,16 +631,21 @@ module Hbase
       # Table should exist
       raise(ArgumentError, "Can't find a table: #{table_name}") unless exists?(table_name)
 
-      status = Pair.new
       begin
-        status = @admin.getAlterStatus(org.apache.hadoop.hbase.TableName.valueOf(table_name))
-        if status.getSecond != 0
-          puts "#{status.getSecond - status.getFirst}/#{status.getSecond} regions updated."
+        cluster_metrics = @admin.getClusterMetrics
+        table_region_status = cluster_metrics
+                              .getTableRegionStatesCount
+                              .get(org.apache.hadoop.hbase.TableName.valueOf(table_name))
+        if table_region_status.getTotalRegions != 0
+          updated_regions = table_region_status.getTotalRegions -
+                            table_region_status.getRegionsInTransition -
+                            table_region_status.getClosedRegions
+          puts "#{updated_regions}/#{table_region_status.getTotalRegions} regions updated."
         else
           puts 'All regions updated.'
         end
         sleep 1
-      end while !status.nil? && status.getFirst != 0
+      end while !table_region_status.nil? && table_region_status.getRegionsInTransition != 0
       puts 'Done.'
     end
 
@@ -701,6 +760,7 @@ module Hbase
           next unless k =~ /coprocessor/i
           v = String.new(value)
           v.strip!
+          # TODO: We should not require user to config the coprocessor with our inner format.
           htd.addCoprocessorWithSpec(v)
           valid_coproc_keys << key
         end
@@ -1042,20 +1102,48 @@ module Hbase
     end
 
     #----------------------------------------------------------------------------------------------
+    # Returns the ClusterStatus of the cluster
+    def getClusterStatus
+      @admin.getClusterStatus
+    end
+
+    #----------------------------------------------------------------------------------------------
     # Returns a list of regionservers
     def getRegionServers
       @admin.getClusterStatus.getServers.map { |serverName| serverName }
     end
 
     #----------------------------------------------------------------------------------------------
+    # Returns servername corresponding to passed server_name_string
+    def getServerName(server_name_string)
+      regionservers = getRegionServers
+
+      if ServerName.isFullServerName(server_name_string)
+        return ServerName.valueOf(server_name_string)
+      else
+        name_list = server_name_string.split(',')
+
+        regionservers.each do|sn|
+          if name_list[0] == sn.hostname && (name_list[1].nil? ? true : (name_list[1] == sn.port.to_s))
+            return sn
+          end
+        end
+      end
+
+      return nil
+    end
+
+    #----------------------------------------------------------------------------------------------
     # Returns a list of servernames
-    def getServerNames(servers)
+    def getServerNames(servers, should_return_all_if_servers_empty)
       regionservers = getRegionServers
       servernames = []
 
       if servers.empty?
         # if no servers were specified as arguments, get a list of all servers
-        servernames = regionservers
+        if should_return_all_if_servers_empty
+          servernames = regionservers
+        end
       else
         # Strings replace with ServerName objects in servers array
         i = 0
@@ -1202,15 +1290,6 @@ module Hbase
       @admin.getSecurityCapabilities
     end
 
-    # Abort a procedure
-    def abort_procedure?(proc_id, may_interrupt_if_running = nil)
-      if may_interrupt_if_running.nil?
-        @admin.abortProcedure(proc_id, true)
-      else
-        @admin.abortProcedure(proc_id, may_interrupt_if_running)
-      end
-    end
-
     # List all procedures
     def list_procedures
       @admin.getProcedures
@@ -1227,7 +1306,11 @@ module Hbase
       htd.setMaxFileSize(JLong.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::MAX_FILESIZE))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::MAX_FILESIZE)
       htd.setReadOnly(JBoolean.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::READONLY))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::READONLY)
       htd.setCompactionEnabled(JBoolean.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::COMPACTION_ENABLED))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::COMPACTION_ENABLED)
+      htd.setSplitEnabled(JBoolean.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::SPLIT_ENABLED))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::SPLIT_ENABLED)
+      htd.setMergeEnabled(JBoolean.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::MERGE_ENABLED))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::MERGE_ENABLED)
       htd.setNormalizationEnabled(JBoolean.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::NORMALIZATION_ENABLED))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::NORMALIZATION_ENABLED)
+      htd.setNormalizerTargetRegionCount(JInteger.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::NORMALIZER_TARGET_REGION_COUNT))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::NORMALIZER_TARGET_REGION_COUNT)
+      htd.setNormalizerTargetRegionSize(JLong.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::NORMALIZER_TARGET_REGION_SIZE))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::NORMALIZER_TARGET_REGION_SIZE)
       htd.setMemStoreFlushSize(JLong.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::MEMSTORE_FLUSHSIZE))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::MEMSTORE_FLUSHSIZE)
       htd.setDurability(org.apache.hadoop.hbase.client.Durability.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::DURABILITY))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::DURABILITY)
       htd.setPriority(JInteger.valueOf(arg.delete(org.apache.hadoop.hbase.HTableDescriptor::PRIORITY))) if arg.include?(org.apache.hadoop.hbase.HTableDescriptor::PRIORITY)
@@ -1286,5 +1369,101 @@ module Hbase
       end
       @admin.clearDeadServers(servers).to_a
     end
+
+    #----------------------------------------------------------------------------------------------
+    # List live region servers
+    def list_liveservers
+      @admin.getClusterStatus.getServers.to_a
+    end
+
+    #---------------------------------------------------------------------------
+    # create a new table by cloning the existent table schema.
+    def clone_table_schema(table_name, new_table_name, preserve_splits = true)
+      @admin.cloneTableSchema(TableName.valueOf(table_name),
+                              TableName.valueOf(new_table_name),
+                              preserve_splits)
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # List decommissioned RegionServers
+    def list_decommissioned_regionservers
+      @admin.listDecommissionedRegionServers
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # Decommission a list of region servers, optionally offload corresponding regions
+    def decommission_regionservers(host_or_servers, should_offload)
+      # Fail if host_or_servers is neither a string nor an array
+      unless host_or_servers.is_a?(Array) || host_or_servers.is_a?(String)
+        raise(ArgumentError,
+             "#{host_or_servers.class} of #{host_or_servers.inspect} is not of Array/String type")
+      end
+
+      # Fail if should_offload is neither a TrueClass/FalseClass nor a string
+      unless (!!should_offload == should_offload) || should_offload.is_a?(String)
+        raise(ArgumentError, "#{should_offload} is not a boolean value")
+      end
+
+      # If a string is passed, convert  it to an array
+      _host_or_servers =  host_or_servers.is_a?(Array) ?
+                          host_or_servers :
+                          java.util.Arrays.asList(host_or_servers)
+
+      # Retrieve the server names corresponding to passed _host_or_servers list
+      server_names = getServerNames(_host_or_servers, false)
+
+      # Fail, if we can not find any server(s) corresponding to the passed host_or_servers
+      if server_names.empty?
+        raise(ArgumentError,
+             "Could not find any server(s) with specified name(s): #{host_or_servers}")
+      end
+
+      @admin.decommissionRegionServers(server_names,
+                                       java.lang.Boolean.valueOf(should_offload))
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # Recommission a region server, optionally load a list of passed regions
+    def recommission_regionserver(server_name_string, encoded_region_names)
+      # Fail if server_name_string is not a string
+      unless server_name_string.is_a?(String)
+        raise(ArgumentError,
+             "#{server_name_string.class} of #{server_name_string.inspect} is not of String type")
+      end
+
+      # Fail if encoded_region_names is not an array
+      unless encoded_region_names.is_a?(Array)
+        raise(ArgumentError,
+             "#{encoded_region_names.class} of #{encoded_region_names.inspect} is not of Array type")
+      end
+
+      # Convert encoded_region_names from string to bytes (element-wise)
+      region_names_in_bytes = encoded_region_names
+                              .map {|region_name| region_name.to_java_bytes}
+                              .compact
+
+      # Retrieve the server name corresponding to the passed server_name_string
+      server_name = getServerName(server_name_string)
+
+      # Fail if we can not find a server corresponding to the passed server_name_string
+      if server_name.nil?
+        raise(ArgumentError,
+             "Could not find any server with name #{server_name_string}")
+      end
+
+      @admin.recommissionRegionServer(server_name, region_names_in_bytes)
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # Stop the active Master
+    def stop_master
+      @admin.stopMaster
+    end
+
+    # Stop the given RegionServer
+    def stop_regionserver(hostport)
+      @admin.stopRegionServer(hostport)
+    end
   end
+  # rubocop:enable Metrics/ClassLength
 end

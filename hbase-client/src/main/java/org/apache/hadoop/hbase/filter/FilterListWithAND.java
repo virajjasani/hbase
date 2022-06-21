@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * FilterListWithAND represents an ordered list of filters which will be evaluated with an AND
@@ -154,6 +155,11 @@ public class FilterListWithAND extends FilterListBase {
         "Received code is not valid. rc: " + rc + ", localRC: " + localRC);
   }
 
+  private boolean isIncludeRelatedReturnCode(ReturnCode rc) {
+    return isInReturnCodes(rc, ReturnCode.INCLUDE, ReturnCode.INCLUDE_AND_NEXT_COL,
+      ReturnCode.INCLUDE_AND_SEEK_NEXT_ROW);
+  }
+
   @Override
   public ReturnCode filterCell(Cell c) throws IOException {
     if (isEmpty()) {
@@ -168,10 +174,15 @@ public class FilterListWithAND extends FilterListBase {
       }
       ReturnCode localRC;
       localRC = filter.filterCell(c);
-      rc = mergeReturnCode(rc, localRC);
-
       if (localRC == ReturnCode.SEEK_NEXT_USING_HINT) {
         seekHintFilters.add(filter);
+      }
+      rc = mergeReturnCode(rc, localRC);
+      // Only when rc is INCLUDE* case, we should pass the cell to the following sub-filters.
+      // otherwise we may mess up the global state (such as offset, count..) in the following
+      // sub-filters. (HBASE-20565)
+      if (!isIncludeRelatedReturnCode(rc)) {
+        return rc;
       }
     }
     if (!seekHintFilters.isEmpty()) {
@@ -268,5 +279,22 @@ public class FilterListWithAND extends FilterListBase {
       }
     }
     return maxHint;
+  }
+
+  @Override
+  public boolean equals(Object obj) {
+    if (!(obj instanceof FilterListWithAND)) {
+      return false;
+    }
+    if (this == obj) {
+      return true;
+    }
+    FilterListWithAND f = (FilterListWithAND) obj;
+    return this.filters.equals(f.getFilters()) && this.seekHintFilters.equals(f.seekHintFilters);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(this.seekHintFilters, this.filters);
   }
 }

@@ -29,6 +29,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
@@ -40,12 +41,14 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.InvalidFamilyOperationException;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.TableExistsException;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotDisabledException;
 import org.apache.hadoop.hbase.TableNotEnabledException;
 import org.apache.hadoop.hbase.TableNotFoundException;
 import org.apache.hadoop.hbase.exceptions.MergeRegionException;
 import org.apache.hadoop.hbase.master.LoadBalancer;
+import org.apache.hadoop.hbase.regionserver.DisabledRegionSplitPolicy;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.HStoreFile;
@@ -54,6 +57,7 @@ import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.hbase.util.Threads;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -498,9 +502,50 @@ public class TestAdmin1 {
    }
 
   /**
+   * Verify schema change for read only table
+   */
+  @Test
+  public void testReadOnlyTableModify() throws IOException, InterruptedException {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    TEST_UTIL.createTable(tableName, HConstants.CATALOG_FAMILY).close();
+
+    // Make table read only
+    TableDescriptor htd = TableDescriptorBuilder.newBuilder(this.admin.getDescriptor(tableName))
+      .setReadOnly(true).build();
+    admin.modifyTable(htd);
+
+    // try to modify the read only table now
+    htd = TableDescriptorBuilder.newBuilder(this.admin.getDescriptor(tableName))
+      .setCompactionEnabled(false).build();
+    admin.modifyTable(htd);
+    // Delete the table
+    this.admin.disableTable(tableName);
+    this.admin.deleteTable(tableName);
+    assertFalse(this.admin.tableExists(tableName));
+  }
+
+  @Test(expected = TableNotDisabledException.class)
+  public void testModifyRegionReplicasEnabledTable() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    TEST_UTIL.createTable(tableName, HConstants.CATALOG_FAMILY).close();
+
+    // Modify region replication count
+    TableDescriptor htd = TableDescriptorBuilder.newBuilder(admin.getDescriptor(tableName))
+        .setRegionReplication(3).build();
+    try {
+      // try to modify the region replication count without disabling the table
+      admin.modifyTable(htd);
+      fail("Expected an exception");
+    } finally {
+      // Delete the table
+      admin.disableTable(tableName);
+      admin.deleteTable(tableName);
+      assertFalse(admin.tableExists(tableName));
+    }
+  }
+
+  /**
    * Verify schema modification takes.
-   * @throws IOException
-   * @throws InterruptedException
    */
   @Test
   public void testOnlineChangeTableSchema() throws IOException, InterruptedException {
@@ -1170,7 +1215,7 @@ public class TestAdmin1 {
     // the element at index 1 would be a replica (since the metareader gives us ordered
     // regions). Try splitting that region via the split API . Should fail
     try {
-      TEST_UTIL.getAdmin().splitRegion(regions.get(1).getFirst().getRegionName());
+      TEST_UTIL.getAdmin().splitRegionAsync(regions.get(1).getFirst().getRegionName()).get();
     } catch (IllegalArgumentException ex) {
       gotException = true;
     }
@@ -1390,5 +1435,180 @@ public class TestAdmin1 {
       this.admin.disableTable(tableName);
       this.admin.deleteTable(tableName);
     }
+  }
+
+  @Test
+  public void testMergeRegionsInvalidRegionCount()
+      throws IOException, InterruptedException, ExecutionException {
+    TableName tableName = TableName.valueOf(name.getMethodName());
+    TableDescriptor td = TableDescriptorBuilder.newBuilder(tableName)
+      .setColumnFamily(ColumnFamilyDescriptorBuilder.of("d")).build();
+    byte[][] splitRows = new byte[2][];
+    splitRows[0] = new byte[] { (byte) '3' };
+    splitRows[1] = new byte[] { (byte) '6' };
+    try {
+      TEST_UTIL.createTable(td, splitRows);
+      TEST_UTIL.waitTableAvailable(tableName);
+
+      List<RegionInfo> tableRegions = admin.getRegions(tableName);
+      // 0
+      try {
+        admin.mergeRegionsAsync(new byte[0][0], false).get();
+        fail();
+      } catch (IllegalArgumentException e) {
+        // expected
+      }
+      // 1
+      try {
+        admin.mergeRegionsAsync(new byte[][] { tableRegions.get(0).getEncodedNameAsBytes() }, false)
+          .get();
+        fail();
+      } catch (IllegalArgumentException e) {
+        // expected
+      }
+    } finally {
+      admin.disableTable(tableName);
+      admin.deleteTable(tableName);
+    }
+  }
+
+  @Test
+  public void testSplitShouldNotHappenIfSplitIsDisabledForTable()
+      throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    HTableDescriptor htd = new HTableDescriptor(tableName);
+    htd.addFamily(new HColumnDescriptor("f"));
+    htd.setRegionSplitPolicyClassName(DisabledRegionSplitPolicy.class.getName());
+    Table table = TEST_UTIL.createTable(htd, null);
+    for(int i = 0; i < 10; i++) {
+      Put p = new Put(Bytes.toBytes("row"+i));
+      byte[] q1 = Bytes.toBytes("q1");
+      byte[] v1 = Bytes.toBytes("v1");
+      p.addColumn(Bytes.toBytes("f"), q1, v1);
+      table.put(p);
+    }
+    this.admin.flush(tableName);
+    try {
+      this.admin.split(tableName, Bytes.toBytes("row5"));
+      Threads.sleep(10000);
+    } catch (Exception e) {
+      // Nothing to do.
+    }
+    // Split should not happen.
+    List<RegionInfo> allRegions = MetaTableAccessor.getTableRegions(
+        this.admin.getConnection(), tableName, true);
+    assertEquals(1, allRegions.size());
+  }
+
+  @Test
+  public void testCloneTableSchema() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    final TableName newTableName = TableName.valueOf(tableName.getNameAsString() + "_new");
+    testCloneTableSchema(tableName, newTableName, false);
+  }
+
+  @Test
+  public void testCloneTableSchemaPreservingSplits() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    final TableName newTableName = TableName.valueOf(tableName.getNameAsString() + "_new");
+    testCloneTableSchema(tableName, newTableName, true);
+  }
+
+  private void testCloneTableSchema(final TableName tableName,
+      final TableName newTableName, boolean preserveSplits) throws Exception {
+    byte[] FAMILY_0 = Bytes.toBytes("cf0");
+    byte[] FAMILY_1 = Bytes.toBytes("cf1");
+    byte[][] splitKeys = new byte[2][];
+    splitKeys[0] = Bytes.toBytes(4);
+    splitKeys[1] = Bytes.toBytes(8);
+    int NUM_FAMILYS = 2;
+    int NUM_REGIONS = 3;
+    int BLOCK_SIZE = 1024;
+    int TTL = 86400;
+    boolean BLOCK_CACHE = false;
+
+    // Create the table
+    TableDescriptor tableDesc = TableDescriptorBuilder
+        .newBuilder(tableName)
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.of(FAMILY_0))
+        .setColumnFamily(ColumnFamilyDescriptorBuilder
+            .newBuilder(FAMILY_1)
+            .setBlocksize(BLOCK_SIZE)
+            .setBlockCacheEnabled(BLOCK_CACHE)
+            .setTimeToLive(TTL)
+            .build()
+        ).build();
+    admin.createTable(tableDesc, splitKeys);
+
+    assertEquals(NUM_REGIONS, TEST_UTIL.getHBaseCluster().getRegions(tableName).size());
+    assertTrue("Table should be created with splitKyes + 1 rows in META",
+        admin.isTableAvailable(tableName, splitKeys));
+
+    // clone & Verify
+    admin.cloneTableSchema(tableName, newTableName, preserveSplits);
+    TableDescriptor newTableDesc = admin.getDescriptor(newTableName);
+
+    assertEquals(NUM_FAMILYS, newTableDesc.getColumnFamilyCount());
+    assertEquals(BLOCK_SIZE, newTableDesc.getColumnFamily(FAMILY_1).getBlocksize());
+    assertEquals(BLOCK_CACHE, newTableDesc.getColumnFamily(FAMILY_1).isBlockCacheEnabled());
+    assertEquals(TTL, newTableDesc.getColumnFamily(FAMILY_1).getTimeToLive());
+    TEST_UTIL.verifyTableDescriptorIgnoreTableName(tableDesc, newTableDesc);
+
+    if (preserveSplits) {
+      assertEquals(NUM_REGIONS, TEST_UTIL.getHBaseCluster().getRegions(newTableName).size());
+      assertTrue("New table should be created with splitKyes + 1 rows in META",
+          admin.isTableAvailable(newTableName, splitKeys));
+    } else {
+      assertEquals(1, TEST_UTIL.getHBaseCluster().getRegions(newTableName).size());
+    }
+  }
+
+  @Test
+  public void testCloneTableSchemaWithNonExistentSourceTable() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    final TableName newTableName = TableName.valueOf(tableName.getNameAsString() + "_new");
+    // test for non-existent source table
+    try {
+      admin.cloneTableSchema(tableName, newTableName, false);
+      fail("Should have failed to create a new table by cloning non-existent source table.");
+    } catch (TableNotFoundException ex) {
+      // expected
+    }
+  }
+
+  @Test
+  public void testCloneTableSchemaWithExistentDestinationTable() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    final TableName newTableName = TableName.valueOf(tableName.getNameAsString() + "_new");
+    byte[] FAMILY_0 = Bytes.toBytes("cf0");
+    TEST_UTIL.createTable(tableName, FAMILY_0);
+    TEST_UTIL.createTable(newTableName, FAMILY_0);
+    // test for existent destination table
+    try {
+      admin.cloneTableSchema(tableName, newTableName, false);
+      fail("Should have failed to create a existent table.");
+    } catch (TableExistsException ex) {
+      // expected
+    }
+  }
+
+  @Test
+  public void testModifyTableOnTableWithRegionReplicas() throws Exception {
+    TableName tableName = TableName.valueOf(name.getMethodName());
+    TableDescriptor desc = TableDescriptorBuilder.newBuilder(tableName)
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.of(Bytes.toBytes("cf")))
+        .setRegionReplication(5)
+        .build();
+
+    admin.createTable(desc);
+
+    int maxFileSize = 10000000;
+    TableDescriptor newDesc = TableDescriptorBuilder.newBuilder(desc)
+        .setMaxFileSize(maxFileSize)
+        .build();
+
+    admin.modifyTable(newDesc);
+    TableDescriptor newTableDesc = admin.getDescriptor(tableName);
+    assertEquals(maxFileSize, newTableDesc.getMaxFileSize());
   }
 }

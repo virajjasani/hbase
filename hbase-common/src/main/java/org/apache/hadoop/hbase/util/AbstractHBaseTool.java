@@ -22,16 +22,6 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 
-import org.apache.commons.cli.BasicParser;
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.CommandLineParser;
-import org.apache.commons.cli.DefaultParser;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.MissingOptionException;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
-import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.util.Tool;
@@ -40,14 +30,24 @@ import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.hbase.thirdparty.org.apache.commons.cli.BasicParser;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLine;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLineParser;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.DefaultParser;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.HelpFormatter;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.MissingOptionException;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.Option;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.Options;
+import org.apache.hbase.thirdparty.org.apache.commons.cli.ParseException;
+
 /**
  * Common base class used for HBase command-line tools. Simplifies workflow and
  * command-line argument parsing.
  */
 @InterfaceAudience.Private
-public abstract class AbstractHBaseTool implements Tool, Configurable {
-  protected static final int EXIT_SUCCESS = 0;
-  protected static final int EXIT_FAILURE = 1;
+public abstract class AbstractHBaseTool implements Tool {
+  public static final int EXIT_SUCCESS = 0;
+  public static final int EXIT_FAILURE = 1;
 
   public static final String SHORT_HELP_OPTION = "h";
   public static final String LONG_HELP_OPTION = "help";
@@ -136,7 +136,7 @@ public abstract class AbstractHBaseTool implements Tool, Configurable {
       }
       String[] remainingArgs = new String[argsList.size()];
       argsList.toArray(remainingArgs);
-      cmd = new DefaultParser().parse(options, remainingArgs);
+      cmd = newParser().parse(options, remainingArgs);
     } catch (MissingOptionException e) {
       LOG.error(e.getMessage());
       LOG.error("Use -h or --help for usage instructions.");
@@ -157,6 +157,16 @@ public abstract class AbstractHBaseTool implements Tool, Configurable {
       return EXIT_FAILURE;
     }
     return ret;
+  }
+
+  /**
+   * Create the parser to use for parsing and validating the command line. Since commons-cli lacks
+   * the capability to validate arbitrary combination of options, it may be helpful to bake custom
+   * logic into a specialized parser implementation. See LoadTestTool for examples.
+   * @return a new parser specific to the current tool
+   */
+  protected CommandLineParser newParser() {
+    return new DefaultParser();
   }
 
   private boolean isHelpCommand(String[] args) throws ParseException {

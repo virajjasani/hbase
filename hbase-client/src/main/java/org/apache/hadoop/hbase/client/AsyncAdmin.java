@@ -18,7 +18,7 @@
 package org.apache.hadoop.hbase.client;
 
 import com.google.protobuf.RpcChannel;
-
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.List;
@@ -28,7 +28,6 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.regex.Pattern;
-
 import org.apache.hadoop.hbase.CacheEvictionStats;
 import org.apache.hadoop.hbase.ClusterMetrics;
 import org.apache.hadoop.hbase.ClusterMetrics.Option;
@@ -40,8 +39,12 @@ import org.apache.hadoop.hbase.client.replication.TableCFs;
 import org.apache.hadoop.hbase.client.security.SecurityCapability;
 import org.apache.hadoop.hbase.quotas.QuotaFilter;
 import org.apache.hadoop.hbase.quotas.QuotaSettings;
+import org.apache.hadoop.hbase.quotas.SpaceQuotaSnapshotView;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
 import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+import org.apache.hadoop.hbase.security.access.GetUserPermissionsRequest;
+import org.apache.hadoop.hbase.security.access.Permission;
+import org.apache.hadoop.hbase.security.access.UserPermission;
 import org.apache.yetus.audience.InterfaceAudience;
 
 /**
@@ -81,6 +84,13 @@ public interface AsyncAdmin {
    */
   CompletableFuture<List<TableDescriptor>> listTableDescriptors(Pattern pattern,
       boolean includeSysTables);
+
+  /**
+   * List specific tables including system tables.
+   * @param tableNames the table list to match against
+   * @return - returns a list of TableDescriptors wrapped by a {@link CompletableFuture}.
+   */
+  CompletableFuture<List<TableDescriptor>> listTableDescriptors(List<TableName> tableNames);
 
   /**
    * Get list of table descriptors by namespace.
@@ -215,7 +225,9 @@ public interface AsyncAdmin {
    * {@link CompletableFuture}.
    * @param tableName name of table to check
    * @param splitKeys keys to check if the table has been created with all split keys
+   * @deprecated Since 2.2.0. Will be removed in 3.0.0. Use {@link #isTableAvailable(TableName)}
    */
+  @Deprecated
   CompletableFuture<Boolean> isTableAvailable(TableName tableName, byte[][] splitKeys);
 
   /**
@@ -303,6 +315,7 @@ public interface AsyncAdmin {
   /**
    * Compact a table. When the returned CompletableFuture is done, it only means the compact request
    * was sent to HBase and may need some time to finish the compact operation.
+   * Throws {@link org.apache.hadoop.hbase.TableNotFoundException} if table not found.
    * @param tableName table to compact
    */
   default CompletableFuture<Void> compact(TableName tableName) {
@@ -313,6 +326,7 @@ public interface AsyncAdmin {
    * Compact a column family within a table. When the returned CompletableFuture is done, it only
    * means the compact request was sent to HBase and may need some time to finish the compact
    * operation.
+   * Throws {@link org.apache.hadoop.hbase.TableNotFoundException} if table not found.
    * @param tableName table to compact
    * @param columnFamily column family within a table. If not present, compact the table's all
    *          column families.
@@ -324,6 +338,8 @@ public interface AsyncAdmin {
   /**
    * Compact a table. When the returned CompletableFuture is done, it only means the compact request
    * was sent to HBase and may need some time to finish the compact operation.
+   * Throws {@link org.apache.hadoop.hbase.TableNotFoundException} if table not found for
+   * normal compaction type.
    * @param tableName table to compact
    * @param compactType {@link org.apache.hadoop.hbase.client.CompactType}
    */
@@ -333,6 +349,8 @@ public interface AsyncAdmin {
    * Compact a column family within a table. When the returned CompletableFuture is done, it only
    * means the compact request was sent to HBase and may need some time to finish the compact
    * operation.
+   * Throws {@link org.apache.hadoop.hbase.TableNotFoundException} if table not found for
+   * normal compaction type.
    * @param tableName table to compact
    * @param columnFamily column family within a table
    * @param compactType {@link org.apache.hadoop.hbase.client.CompactType}
@@ -360,6 +378,7 @@ public interface AsyncAdmin {
   /**
    * Major compact a table. When the returned CompletableFuture is done, it only means the compact
    * request was sent to HBase and may need some time to finish the compact operation.
+   * Throws {@link org.apache.hadoop.hbase.TableNotFoundException} if table not found.
    * @param tableName table to major compact
    */
   default CompletableFuture<Void> majorCompact(TableName tableName) {
@@ -370,6 +389,8 @@ public interface AsyncAdmin {
    * Major compact a column family within a table. When the returned CompletableFuture is done, it
    * only means the compact request was sent to HBase and may need some time to finish the compact
    * operation.
+   * Throws {@link org.apache.hadoop.hbase.TableNotFoundException} if table not found for
+   * normal compaction. type.
    * @param tableName table to major compact
    * @param columnFamily column family within a table. If not present, major compact the table's all
    *          column families.
@@ -381,6 +402,8 @@ public interface AsyncAdmin {
   /**
    * Major compact a table. When the returned CompletableFuture is done, it only means the compact
    * request was sent to HBase and may need some time to finish the compact operation.
+   * Throws {@link org.apache.hadoop.hbase.TableNotFoundException} if table not found for
+   * normal compaction type.
    * @param tableName table to major compact
    * @param compactType {@link org.apache.hadoop.hbase.client.CompactType}
    */
@@ -390,6 +413,7 @@ public interface AsyncAdmin {
    * Major compact a column family within a table. When the returned CompletableFuture is done, it
    * only means the compact request was sent to HBase and may need some time to finish the compact
    * operation.
+   * Throws {@link org.apache.hadoop.hbase.TableNotFoundException} if table not found.
    * @param tableName table to major compact
    * @param columnFamily column family within a table. If not present, major compact the table's all
    *          column families.
@@ -429,10 +453,25 @@ public interface AsyncAdmin {
 
   /**
    * Turn the Merge switch on or off.
-   * @param on
+   * @param enabled enabled or not
    * @return Previous switch value wrapped by a {@link CompletableFuture}
    */
-  CompletableFuture<Boolean> mergeSwitch(boolean on);
+  default CompletableFuture<Boolean> mergeSwitch(boolean enabled) {
+    return mergeSwitch(enabled, false);
+  }
+
+  /**
+   * Turn the Merge switch on or off.
+   * <p/>
+   * Notice that, the method itself is always non-blocking, which means it will always return
+   * immediately. The {@code drainMerges} parameter only effects when will we complete the returned
+   * {@link CompletableFuture}.
+   * @param enabled enabled or not
+   * @param drainMerges If <code>true</code>, it waits until current merge() call, if outstanding,
+   *          to return.
+   * @return Previous switch value wrapped by a {@link CompletableFuture}
+   */
+  CompletableFuture<Boolean> mergeSwitch(boolean enabled, boolean drainMerges);
 
   /**
    * Query the current state of the Merge switch.
@@ -443,10 +482,25 @@ public interface AsyncAdmin {
 
   /**
    * Turn the Split switch on or off.
-   * @param on
+   * @param enabled enabled or not
    * @return Previous switch value wrapped by a {@link CompletableFuture}
    */
-  CompletableFuture<Boolean> splitSwitch(boolean on);
+  default CompletableFuture<Boolean> splitSwitch(boolean enabled) {
+    return splitSwitch(enabled, false);
+  }
+
+  /**
+   * Turn the Split switch on or off.
+   * <p/>
+   * Notice that, the method itself is always non-blocking, which means it will always return
+   * immediately. The {@code drainSplits} parameter only effects when will we complete the returned
+   * {@link CompletableFuture}.
+   * @param enabled enabled or not
+   * @param drainSplits If <code>true</code>, it waits until current split() call, if outstanding,
+   *          to return.
+   * @return Previous switch value wrapped by a {@link CompletableFuture}
+   */
+  CompletableFuture<Boolean> splitSwitch(boolean enabled, boolean drainSplits);
 
   /**
    * Query the current state of the Split switch.
@@ -462,8 +516,22 @@ public interface AsyncAdmin {
    * @param forcible true if do a compulsory merge, otherwise we will only merge two adjacent
    *          regions
    */
-  CompletableFuture<Void> mergeRegions(byte[] nameOfRegionA, byte[] nameOfRegionB,
-      boolean forcible);
+  default CompletableFuture<Void> mergeRegions(byte[] nameOfRegionA, byte[] nameOfRegionB,
+      boolean forcible) {
+    return mergeRegions(Arrays.asList(nameOfRegionA, nameOfRegionB), forcible);
+  }
+
+  /**
+   * Merge regions.
+   * <p/>
+   * You may get a {@code DoNotRetryIOException} if you pass more than two regions in but the master
+   * does not support merging more than two regions. At least till 2.2.0, we still only support
+   * merging two regions.
+   * @param nameOfRegionsToMerge encoded or full name of daughter regions
+   * @param forcible true if do a compulsory merge, otherwise we will only merge two adjacent
+   *          regions
+   */
+  CompletableFuture<Void> mergeRegions(List<byte[]> nameOfRegionsToMerge, boolean forcible);
 
   /**
    * Split a table. The method will execute split action for each region in table.
@@ -732,14 +800,42 @@ public interface AsyncAdmin {
    * @param snapshotName name of the snapshot to restore
    * @param takeFailSafeSnapshot true if the failsafe snapshot should be taken
    */
-  CompletableFuture<Void> restoreSnapshot(String snapshotName, boolean takeFailSafeSnapshot);
+  default CompletableFuture<Void> restoreSnapshot(String snapshotName,
+      boolean takeFailSafeSnapshot) {
+    return restoreSnapshot(snapshotName, takeFailSafeSnapshot, false);
+  }
+
+  /**
+   * Restore the specified snapshot on the original table. (The table must be disabled) If
+   * 'takeFailSafeSnapshot' is set to true, a snapshot of the current table is taken before
+   * executing the restore operation. In case of restore failure, the failsafe snapshot will be
+   * restored. If the restore completes without problem the failsafe snapshot is deleted. The
+   * failsafe snapshot name is configurable by using the property
+   * "hbase.snapshot.restore.failsafe.name".
+   * @param snapshotName name of the snapshot to restore
+   * @param takeFailSafeSnapshot true if the failsafe snapshot should be taken
+   * @param restoreAcl <code>true</code> to restore acl of snapshot
+   */
+  CompletableFuture<Void> restoreSnapshot(String snapshotName, boolean takeFailSafeSnapshot,
+      boolean restoreAcl);
 
   /**
    * Create a new table by cloning the snapshot content.
    * @param snapshotName name of the snapshot to be cloned
    * @param tableName name of the table where the snapshot will be restored
    */
-  CompletableFuture<Void> cloneSnapshot(String snapshotName, TableName tableName);
+  default CompletableFuture<Void> cloneSnapshot(String snapshotName, TableName tableName) {
+    return cloneSnapshot(snapshotName, tableName, false);
+  }
+
+  /**
+   * Create a new table by cloning the snapshot content.
+   * @param snapshotName name of the snapshot to be cloned
+   * @param tableName name of the table where the snapshot will be restored
+   * @param restoreAcl <code>true</code> to restore acl of snapshot
+   */
+  CompletableFuture<Void> cloneSnapshot(String snapshotName, TableName tableName,
+      boolean restoreAcl);
 
   /**
    * List completed snapshots.
@@ -846,12 +942,16 @@ public interface AsyncAdmin {
       Map<String, String> props);
 
   /**
-   * abort a procedure
+   * Abort a procedure
+   * Do not use. Usually it is ignored but if not, it can do more damage than good. See hbck2.
    * @param procId ID of the procedure to abort
    * @param mayInterruptIfRunning if the proc completed at least one step, should it be aborted?
    * @return true if aborted, false if procedure already completed or does not exist. the value is
    *         wrapped by {@link CompletableFuture}
+   * @deprecated since 2.1.1 and will be removed in 4.0.0.
+   * @see <a href="https://issues.apache.org/jira/browse/HBASE-21223">HBASE-21223</a>
    */
+  @Deprecated
   CompletableFuture<Boolean> abortProcedure(long procId, boolean mayInterruptIfRunning);
 
   /**
@@ -1066,10 +1166,25 @@ public interface AsyncAdmin {
 
   /**
    * Turn the load balancer on or off.
-   * @param on
+   * @param on Set to <code>true</code> to enable, <code>false</code> to disable.
    * @return Previous balancer value wrapped by a {@link CompletableFuture}.
    */
-  CompletableFuture<Boolean> balancerSwitch(boolean on);
+  default CompletableFuture<Boolean> balancerSwitch(boolean on) {
+    return balancerSwitch(on, false);
+  }
+
+  /**
+   * Turn the load balancer on or off.
+   * <p/>
+   * Notice that, the method itself is always non-blocking, which means it will always return
+   * immediately. The {@code drainRITs} parameter only effects when will we complete the returned
+   * {@link CompletableFuture}.
+   * @param on Set to <code>true</code> to enable, <code>false</code> to disable.
+   * @param drainRITs If <code>true</code>, it waits until current balance() call, if outstanding,
+   *          to return.
+   * @return Previous balancer value wrapped by a {@link CompletableFuture}.
+   */
+  CompletableFuture<Boolean> balancerSwitch(boolean on, boolean drainRITs);
 
   /**
    * Invoke the balancer. Will run the balancer and if regions to move, it will go ahead and do the
@@ -1230,4 +1345,115 @@ public interface AsyncAdmin {
    * @return CacheEvictionStats related to the eviction wrapped by a {@link CompletableFuture}.
    */
   CompletableFuture<CacheEvictionStats> clearBlockCache(final TableName tableName);
+
+  /**
+   * Create a new table by cloning the existent table schema.
+   *
+   * @param tableName name of the table to be cloned
+   * @param newTableName name of the new table where the table will be created
+   * @param preserveSplits True if the splits should be preserved
+   */
+  CompletableFuture<Void>  cloneTableSchema(final TableName tableName,
+      final TableName newTableName, final boolean preserveSplits);
+
+  /**
+   * Turn the compaction on or off. Disabling compactions will also interrupt any currently ongoing
+   * compactions. This state is ephemeral. The setting will be lost on restart. Compaction
+   * can also be enabled/disabled by modifying configuration hbase.regionserver.compaction.enabled
+   * in hbase-site.xml.
+   *
+   * @param switchState     Set to <code>true</code> to enable, <code>false</code> to disable.
+   * @param serverNamesList list of region servers.
+   * @return Previous compaction states for region servers
+   */
+  CompletableFuture<Map<ServerName, Boolean>> compactionSwitch(boolean switchState,
+      List<String> serverNamesList);
+
+  /**
+   * Switch the rpc throttle enabled state.
+   * @param enable Set to <code>true</code> to enable, <code>false</code> to disable.
+   * @return Previous rpc throttle enabled value
+   */
+  CompletableFuture<Boolean> switchRpcThrottle(boolean enable);
+
+  /**
+   * Get if the rpc throttle is enabled.
+   * @return True if rpc throttle is enabled
+   */
+  CompletableFuture<Boolean> isRpcThrottleEnabled();
+
+  /**
+   * Switch the exceed throttle quota. If enabled, user/table/namespace throttle quota
+   * can be exceeded if region server has availble quota.
+   * @param enable Set to <code>true</code> to enable, <code>false</code> to disable.
+   * @return Previous exceed throttle enabled value
+   */
+  CompletableFuture<Boolean> exceedThrottleQuotaSwitch(boolean enable);
+
+  /**
+   * Fetches the table sizes on the filesystem as tracked by the HBase Master.
+   */
+  CompletableFuture<Map<TableName, Long>> getSpaceQuotaTableSizes();
+
+  /**
+   * Fetches the observed {@link SpaceQuotaSnapshotView}s observed by a RegionServer.
+   */
+  CompletableFuture<? extends Map<TableName, ? extends SpaceQuotaSnapshotView>>
+      getRegionServerSpaceQuotaSnapshots(ServerName serverName);
+
+  /**
+   * Returns the Master's view of a quota on the given {@code namespace} or null if the Master has
+   * no quota information on that namespace.
+   */
+  CompletableFuture<? extends SpaceQuotaSnapshotView>
+      getCurrentSpaceQuotaSnapshot(String namespace);
+
+  /**
+   * Returns the Master's view of a quota on the given {@code tableName} or null if the Master has
+   * no quota information on that table.
+   */
+  CompletableFuture<? extends SpaceQuotaSnapshotView> getCurrentSpaceQuotaSnapshot(
+      TableName tableName);
+
+  /**
+   * Grants user specific permissions
+   * @param userPermission user name and the specific permission
+   * @param mergeExistingPermissions If set to false, later granted permissions will override
+   *          previous granted permissions. otherwise, it'll merge with previous granted
+   *          permissions.
+   */
+  CompletableFuture<Void> grant(UserPermission userPermission, boolean mergeExistingPermissions);
+
+  /**
+   * Revokes user specific permissions
+   * @param userPermission user name and the specific permission
+   */
+  CompletableFuture<Void> revoke(UserPermission userPermission);
+
+  /**
+   * Get the global/namespace/table permissions for user
+   * @param getUserPermissionsRequest A request contains which user, global, namespace or table
+   *          permissions needed
+   * @return The user and permission list
+   */
+  CompletableFuture<List<UserPermission>>
+      getUserPermissions(GetUserPermissionsRequest getUserPermissionsRequest);
+
+  /**
+   * Check if the user has specific permissions
+   * @param userName the user name
+   * @param permissions the specific permission list
+   * @return True if user has the specific permissions
+   */
+  CompletableFuture<List<Boolean>> hasUserPermissions(String userName,
+      List<Permission> permissions);
+
+  /**
+   * Check if call user has specific permissions
+   * @param permissions the specific permission list
+   * @return True if user has the specific permissions
+   */
+  default CompletableFuture<List<Boolean>> hasUserPermissions(List<Permission> permissions) {
+    return hasUserPermissions(null, permissions);
+  }
 }

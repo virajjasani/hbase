@@ -18,7 +18,7 @@
 package org.apache.hadoop.hbase.client;
 
 import static com.codahale.metrics.MetricRegistry.name;
-import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
+import static org.apache.hadoop.hbase.util.ConcurrentMapUtils.computeIfAbsent;
 
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Histogram;
@@ -33,7 +33,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-
+import java.util.function.Supplier;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hbase.thirdparty.com.google.protobuf.Descriptors.MethodDescriptor;
@@ -74,6 +74,7 @@ public class MetricsConnection implements StatisticTrackable {
     private long startTime = 0;
     private long callTimeMs = 0;
     private int concurrentCallsPerServer = 0;
+    private int numActionsPerServer = 0;
 
     public long getRequestSizeBytes() {
       return requestSizeBytes;
@@ -113,6 +114,14 @@ public class MetricsConnection implements StatisticTrackable {
 
     public void setConcurrentCallsPerServer(int callsPerServer) {
       this.concurrentCallsPerServer = callsPerServer;
+    }
+
+    public int getNumActionsPerServer() {
+      return numActionsPerServer;
+    }
+
+    public void setNumActionsPerServer(int numActionsPerServer) {
+      this.numActionsPerServer = numActionsPerServer;
     }
   }
 
@@ -281,6 +290,7 @@ public class MetricsConnection implements StatisticTrackable {
   @VisibleForTesting protected final Counter hedgedReadOps;
   @VisibleForTesting protected final Counter hedgedReadWin;
   @VisibleForTesting protected final Histogram concurrentCallsPerServerHist;
+  @VisibleForTesting protected final Histogram numActionsPerServerHist;
 
   // dynamic metrics
 
@@ -295,30 +305,30 @@ public class MetricsConnection implements StatisticTrackable {
   private final ConcurrentMap<String, Counter> cacheDroppingExceptions =
     new ConcurrentHashMap<>(CAPACITY, LOAD_FACTOR, CONCURRENCY_LEVEL);
 
-  MetricsConnection(final ConnectionImplementation conn) {
-    this.scope = conn.toString();
+  MetricsConnection(String scope, Supplier<ThreadPoolExecutor> batchPool,
+      Supplier<ThreadPoolExecutor> metaPool) {
+    this.scope = scope;
     this.registry = new MetricRegistry();
-
     this.registry.register(getExecutorPoolName(),
         new RatioGauge() {
           @Override
           protected Ratio getRatio() {
-            ThreadPoolExecutor batchPool = (ThreadPoolExecutor) conn.getCurrentBatchPool();
-            if (batchPool == null) {
+            ThreadPoolExecutor pool = batchPool.get();
+            if (pool == null) {
               return Ratio.of(0, 0);
             }
-            return Ratio.of(batchPool.getActiveCount(), batchPool.getMaximumPoolSize());
+            return Ratio.of(pool.getActiveCount(), pool.getMaximumPoolSize());
           }
         });
     this.registry.register(getMetaPoolName(),
         new RatioGauge() {
           @Override
           protected Ratio getRatio() {
-            ThreadPoolExecutor metaPool = (ThreadPoolExecutor) conn.getCurrentMetaLookupPool();
-            if (metaPool == null) {
+            ThreadPoolExecutor pool = metaPool.get();
+            if (pool == null) {
               return Ratio.of(0, 0);
             }
-            return Ratio.of(metaPool.getActiveCount(), metaPool.getMaximumPoolSize());
+            return Ratio.of(pool.getActiveCount(), pool.getMaximumPoolSize());
           }
         });
     this.metaCacheHits = registry.counter(name(this.getClass(), "metaCacheHits", scope));
@@ -337,8 +347,10 @@ public class MetricsConnection implements StatisticTrackable {
     this.putTracker = new CallTracker(this.registry, "Mutate", "Put", scope);
     this.multiTracker = new CallTracker(this.registry, "Multi", scope);
     this.runnerStats = new RunnerStats(this.registry);
-    this.concurrentCallsPerServerHist = registry.histogram(name(MetricsConnection.class, 
+    this.concurrentCallsPerServerHist = registry.histogram(name(MetricsConnection.class,
       "concurrentCallsPerServer", scope));
+    this.numActionsPerServerHist = registry.histogram(name(MetricsConnection.class,
+      "numActionsPerServer", scope));
 
     this.reporter = JmxReporter.forRegistry(this.registry).build();
     this.reporter.start();
@@ -389,6 +401,11 @@ public class MetricsConnection implements StatisticTrackable {
     metaCacheNumClearRegion.inc();
   }
 
+  /** Increment the number of meta cache drops requested for individual region. */
+  public void incrMetaCacheNumClearRegion(int count) {
+    metaCacheNumClearRegion.inc(count);
+  }
+
   /** Increment the number of hedged read that have occurred. */
   public void incrHedgedReadOps() {
     hedgedReadOps.inc();
@@ -404,13 +421,9 @@ public class MetricsConnection implements StatisticTrackable {
     this.runnerStats.incrNormalRunners();
   }
 
-  /** Increment the number of delay runner counts. */
-  public void incrDelayRunners() {
+  /** Increment the number of delay runner counts and update delay interval of delay runner. */
+  public void incrDelayRunnersAndUpdateDelayInterval(long interval) {
     this.runnerStats.incrDelayRunners();
-  }
-
-  /** Update delay interval of delay runner. */
-  public void updateDelayInterval(long interval) {
     this.runnerStats.updateDelayInterval(interval);
   }
 
@@ -442,59 +455,60 @@ public class MetricsConnection implements StatisticTrackable {
     // if we could dispatch based on something static, ie, request Message type.
     if (method.getService() == ClientService.getDescriptor()) {
       switch(method.getIndex()) {
-      case 0:
-        assert "Get".equals(method.getName());
-        getTracker.updateRpc(stats);
-        return;
-      case 1:
-        assert "Mutate".equals(method.getName());
-        final MutationType mutationType = ((MutateRequest) param).getMutation().getMutateType();
-        switch(mutationType) {
-        case APPEND:
-          appendTracker.updateRpc(stats);
+        case 0:
+          assert "Get".equals(method.getName());
+          getTracker.updateRpc(stats);
           return;
-        case DELETE:
-          deleteTracker.updateRpc(stats);
+        case 1:
+          assert "Mutate".equals(method.getName());
+          final MutationType mutationType = ((MutateRequest) param).getMutation().getMutateType();
+          switch(mutationType) {
+            case APPEND:
+              appendTracker.updateRpc(stats);
+              return;
+            case DELETE:
+              deleteTracker.updateRpc(stats);
+              return;
+            case INCREMENT:
+              incrementTracker.updateRpc(stats);
+              return;
+            case PUT:
+              putTracker.updateRpc(stats);
+              return;
+            default:
+              throw new RuntimeException("Unrecognized mutation type " + mutationType);
+          }
+        case 2:
+          assert "Scan".equals(method.getName());
+          scanTracker.updateRpc(stats);
           return;
-        case INCREMENT:
-          incrementTracker.updateRpc(stats);
-          return;
-        case PUT:
-          putTracker.updateRpc(stats);
+        case 3:
+          assert "BulkLoadHFile".equals(method.getName());
+          // use generic implementation
+          break;
+        case 4:
+          assert "PrepareBulkLoad".equals(method.getName());
+          // use generic implementation
+          break;
+        case 5:
+          assert "CleanupBulkLoad".equals(method.getName());
+          // use generic implementation
+          break;
+        case 6:
+          assert "ExecService".equals(method.getName());
+          // use generic implementation
+          break;
+        case 7:
+          assert "ExecRegionServerService".equals(method.getName());
+          // use generic implementation
+          break;
+        case 8:
+          assert "Multi".equals(method.getName());
+          numActionsPerServerHist.update(stats.getNumActionsPerServer());
+          multiTracker.updateRpc(stats);
           return;
         default:
-          throw new RuntimeException("Unrecognized mutation type " + mutationType);
-        }
-      case 2:
-        assert "Scan".equals(method.getName());
-        scanTracker.updateRpc(stats);
-        return;
-      case 3:
-        assert "BulkLoadHFile".equals(method.getName());
-        // use generic implementation
-        break;
-      case 4:
-        assert "PrepareBulkLoad".equals(method.getName());
-        // use generic implementation
-        break;
-      case 5:
-        assert "CleanupBulkLoad".equals(method.getName());
-        // use generic implementation
-        break;
-      case 6:
-        assert "ExecService".equals(method.getName());
-        // use generic implementation
-        break;
-      case 7:
-        assert "ExecRegionServerService".equals(method.getName());
-        // use generic implementation
-        break;
-      case 8:
-        assert "Multi".equals(method.getName());
-        multiTracker.updateRpc(stats);
-        return;
-      default:
-        throw new RuntimeException("Unrecognized ClientService RPC type " + method.getFullName());
+          throw new RuntimeException("Unrecognized ClientService RPC type " + method.getFullName());
       }
     }
     // Fallback to dynamic registry lookup for DDL methods.

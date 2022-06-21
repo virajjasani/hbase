@@ -211,7 +211,7 @@ public class TestWALObserver {
 
     Map<byte[], List<Cell>> familyMap = p.getFamilyCellMap();
     WALEdit edit = new WALEdit();
-    addFamilyMapToWALEdit(familyMap, edit);
+    edit.add(familyMap);
 
     boolean foundFamily0 = false;
     boolean foundFamily2 = false;
@@ -432,24 +432,6 @@ public class TestWALObserver {
     return p;
   }
 
-  /**
-   * Copied from HRegion.
-   *
-   * @param familyMap
-   *          map of family->edits
-   * @param walEdit
-   *          the destination entry to append into
-   */
-  private void addFamilyMapToWALEdit(Map<byte[], List<Cell>> familyMap,
-      WALEdit walEdit) {
-    for (List<Cell> edits : familyMap.values()) {
-      for (Cell cell : edits) {
-        // KeyValue v1 expectation. Cast for now until we go all Cell all the time. TODO.
-        walEdit.add(cell);
-      }
-    }
-  }
-
   private Path runWALSplit(final Configuration c) throws IOException {
     List<Path> splits = WALSplitter.split(
       hbaseRootDir, logDir, oldLogDir, FileSystem.get(c), c, wals);
@@ -485,14 +467,14 @@ public class TestWALObserver {
   private TableDescriptor getBasic3FamilyHTableDescriptor(TableName tableName) {
     TableDescriptorBuilder builder = TableDescriptorBuilder.newBuilder(tableName);
     Arrays.stream(TEST_FAMILY).map(ColumnFamilyDescriptorBuilder::of)
-        .forEachOrdered(builder::addColumnFamily);
+        .forEachOrdered(builder::setColumnFamily);
     return builder.build();
   }
 
   private TableDescriptor createBasic3FamilyHTD(String tableName) {
     return TableDescriptorBuilder.newBuilder(TableName.valueOf(tableName))
-        .addColumnFamily(ColumnFamilyDescriptorBuilder.of("a"))
-        .addColumnFamily(ColumnFamilyDescriptorBuilder.of("b"))
-        .addColumnFamily(ColumnFamilyDescriptorBuilder.of("c")).build();
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.of("a"))
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.of("b"))
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.of("c")).build();
   }
 }

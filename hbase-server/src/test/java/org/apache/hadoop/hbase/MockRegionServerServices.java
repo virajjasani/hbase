@@ -17,15 +17,16 @@
  */
 package org.apache.hadoop.hbase;
 
+import com.google.protobuf.Service;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.hbase.client.ClusterConnection;
@@ -34,7 +35,9 @@ import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.locking.EntityLock;
 import org.apache.hadoop.hbase.executor.ExecutorService;
 import org.apache.hadoop.hbase.fs.HFileSystem;
+import org.apache.hadoop.hbase.io.hfile.BlockCache;
 import org.apache.hadoop.hbase.ipc.RpcServerInterface;
+import org.apache.hadoop.hbase.mob.MobFileCache;
 import org.apache.hadoop.hbase.quotas.RegionServerRpcQuotaManager;
 import org.apache.hadoop.hbase.quotas.RegionServerSpaceQuotaManager;
 import org.apache.hadoop.hbase.regionserver.FlushRequester;
@@ -51,14 +54,11 @@ import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequester;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.wal.WAL;
-import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
-import org.apache.zookeeper.KeeperException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 
-import com.google.protobuf.Service;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 
 /**
  * Basic mock region server services.  Should only be instantiated by HBaseTestingUtility.b
@@ -121,8 +121,7 @@ public class MockRegionServerServices implements RegionServerServices {
   }
 
   @Override
-  public void postOpenDeployTasks(PostOpenDeployContext context) throws KeeperException,
-      IOException {
+  public void postOpenDeployTasks(PostOpenDeployContext context) throws IOException {
     addRegion(context.getRegion());
   }
 
@@ -157,11 +156,6 @@ public class MockRegionServerServices implements RegionServerServices {
 
   @Override
   public ClusterConnection getConnection() {
-    return null;
-  }
-
-  @Override
-  public MetaTableLocator getMetaTableLocator() {
     return null;
   }
 
@@ -333,5 +327,25 @@ public class MockRegionServerServices implements RegionServerServices {
   @Override
   public Connection createConnection(Configuration conf) throws IOException {
     return null;
+  }
+
+  @Override
+  public boolean isClusterUp() {
+    return true;
+  }
+
+  @Override
+  public TableDescriptors getTableDescriptors() {
+    return null;
+  }
+
+  @Override
+  public Optional<BlockCache> getBlockCache() {
+    return Optional.empty();
+  }
+
+  @Override
+  public Optional<MobFileCache> getMobFileCache() {
+    return Optional.empty();
   }
 }

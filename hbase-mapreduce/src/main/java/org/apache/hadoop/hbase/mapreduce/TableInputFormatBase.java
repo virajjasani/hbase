@@ -26,7 +26,6 @@ import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
@@ -53,6 +52,7 @@ import org.apache.hadoop.mapreduce.RecordReader;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.net.DNS;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * A base for {@link TableInputFormat}s. Receives a {@link Connection}, a {@link TableName},
@@ -291,7 +291,7 @@ public abstract class TableInputFormatBase
    */
   private List<InputSplit> oneInputSplitPerRegion() throws IOException {
     RegionSizeCalculator sizeCalculator =
-        new RegionSizeCalculator(getRegionLocator(), getAdmin());
+        createRegionSizeCalculator(getRegionLocator(), getAdmin());
 
     TableName tableName = getTable().getName();
 
@@ -478,7 +478,8 @@ public abstract class TableInputFormatBase
         while (j < splits.size()) {
           TableSplit nextRegion = (TableSplit) splits.get(j);
           long nextRegionSize = nextRegion.getLength();
-          if (totalSize + nextRegionSize <= averageRegionSize) {
+          if (totalSize + nextRegionSize <= averageRegionSize
+              && Bytes.equals(splitEndKey, nextRegion.getStartRow())) {
             totalSize = totalSize + nextRegionSize;
             splitEndKey = nextRegion.getEndRow();
             j++;
@@ -584,6 +585,12 @@ public abstract class TableInputFormatBase
     this.regionLocator = connection.getRegionLocator(tableName);
     this.admin = connection.getAdmin();
     this.connection = connection;
+  }
+
+  @VisibleForTesting
+  protected RegionSizeCalculator createRegionSizeCalculator(RegionLocator locator, Admin admin)
+      throws IOException {
+    return new RegionSizeCalculator(locator, admin);
   }
 
   /**

@@ -33,6 +33,7 @@ import org.apache.hadoop.hbase.security.User;
 import org.apache.hbase.thirdparty.com.google.protobuf.Message;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.htrace.core.TraceScope;
 
 /**
  * The request processing logic, which is usually executed in thread pools provided by an
@@ -87,6 +88,7 @@ public class CallRunner {
    * Cleanup after ourselves... let go of references.
    */
   private void cleanup() {
+    this.call.cleanup();
     this.call = null;
     this.rpcServer = null;
   }
@@ -109,12 +111,13 @@ public class CallRunner {
       if (RpcServer.LOG.isTraceEnabled()) {
         Optional<User> remoteUser = call.getRequestUser();
         RpcServer.LOG.trace(call.toShortString() + " executing as " +
-            (remoteUser.isPresent() ? "NULL principal" : remoteUser.get().getName()));
+            (remoteUser.isPresent() ? remoteUser.get().getName() : "NULL principal"));
       }
       Throwable errorThrowable = null;
       String error = null;
       Pair<Message, CellScanner> resultPair = null;
       RpcServer.CurCall.set(call);
+      TraceScope traceScope = null;
       try {
         if (!this.rpcServer.isStarted()) {
           InetSocketAddress address = rpcServer.getListenerAddress();
@@ -125,7 +128,7 @@ public class CallRunner {
             call.getService() != null ? call.getService().getDescriptorForType().getName() : "";
         String methodName = (call.getMethod() != null) ? call.getMethod().getName() : "";
         String traceString = serviceName + "." + methodName;
-        TraceUtil.createTrace(traceString);
+        traceScope = TraceUtil.createTrace(traceString);
         // make the call
         resultPair = this.rpcServer.call(call, this.status);
       } catch (TimeoutIOException e){
@@ -138,7 +141,8 @@ public class CallRunner {
             RpcServer.LOG.trace(call.toShortString(), e);
           }
         } else {
-          RpcServer.LOG.debug(call.toShortString(), e);
+          // Don't dump full exception.. just String version
+          RpcServer.LOG.debug(call.toShortString() + ", exception=" + e);
         }
         errorThrowable = e;
         error = StringUtils.stringifyException(e);
@@ -146,6 +150,9 @@ public class CallRunner {
           throw (Error)e;
         }
       } finally {
+        if (traceScope != null) {
+          traceScope.close();
+        }
         RpcServer.CurCall.set(null);
         if (resultPair != null) {
           this.rpcServer.addCallSize(call.getSize() * -1);

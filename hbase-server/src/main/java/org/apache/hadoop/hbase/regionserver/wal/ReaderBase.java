@@ -92,9 +92,6 @@ public abstract class ReaderBase implements AbstractFSWALProvider.Reader {
     if (e == null) {
       e = new Entry();
     }
-    if (compressionContext != null) {
-      e.setCompressionContext(compressionContext);
-    }
 
     boolean hasEntry = false;
     try {
@@ -139,7 +136,7 @@ public abstract class ReaderBase implements AbstractFSWALProvider.Reader {
    * Initializes the compression after the shared stuff has been initialized. Called once.
    */
   protected abstract void initAfterCompression() throws IOException;
-  
+
   /**
    * Initializes the compression after the shared stuff has been initialized. Called once.
    * @param cellCodecClsName class name of cell Codec

@@ -22,9 +22,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.CollectionUtils;
 import org.apache.yetus.audience.InterfaceAudience;
+
+import org.apache.hbase.thirdparty.org.apache.commons.collections4.CollectionUtils;
 
 /**
  * Performs multiple mutations atomically on a single row.
@@ -47,7 +49,7 @@ public class RowMutations implements Row {
    */
   public static RowMutations of(List<? extends Mutation> mutations) throws IOException {
     if (CollectionUtils.isEmpty(mutations)) {
-      throw new IllegalArgumentException("Can't instantiate a RowMutations by empty list");
+      throw new IllegalArgumentException("Cannot instantiate a RowMutations by empty list");
     }
     return new RowMutations(mutations.get(0).getRow(), mutations.size())
         .add(mutations);

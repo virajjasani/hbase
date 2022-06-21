@@ -57,7 +57,12 @@ public class DeleteNamespaceProcedure
   }
 
   public DeleteNamespaceProcedure(final MasterProcedureEnv env, final String namespaceName) {
-    super(env);
+    this(env, namespaceName, null);
+  }
+
+  public DeleteNamespaceProcedure(final MasterProcedureEnv env, final String namespaceName,
+      final ProcedurePrepareLatch latch) {
+    super(env, latch);
     this.namespaceName = namespaceName;
     this.nsDescriptor = null;
     this.traceEnabled = null;
@@ -66,15 +71,16 @@ public class DeleteNamespaceProcedure
   @Override
   protected Flow executeFromState(final MasterProcedureEnv env, final DeleteNamespaceState state)
       throws InterruptedException {
-    if (isTraceEnabled()) {
-      LOG.trace(this + " execute state=" + state);
-    }
-    LOG.info(this + " execute state=" + state);
-
+    LOG.info(this.toString());
     try {
       switch (state) {
       case DELETE_NAMESPACE_PREPARE:
-        prepareDelete(env);
+        boolean present = prepareDelete(env);
+        releaseSyncLatch();
+        if (!present) {
+          assert isFailed() : "Delete namespace should have an exception here";
+          return Flow.NO_MORE_STATE;
+        }
         setNextState(DeleteNamespaceState.DELETE_NAMESPACE_DELETE_FROM_NS_TABLE);
         break;
       case DELETE_NAMESPACE_DELETE_FROM_NS_TABLE:
@@ -113,6 +119,7 @@ public class DeleteNamespaceProcedure
       // nothing to rollback, pre is just table-state checks.
       // We can fail if the table does not exist or is not disabled.
       // TODO: coprocessor rollback semantic is still undefined.
+      releaseSyncLatch();
       return;
     }
 
@@ -188,27 +195,34 @@ public class DeleteNamespaceProcedure
    * @param env MasterProcedureEnv
    * @throws IOException
    */
-  private void prepareDelete(final MasterProcedureEnv env) throws IOException {
+  private boolean prepareDelete(final MasterProcedureEnv env) throws IOException {
     if (getTableNamespaceManager(env).doesNamespaceExist(namespaceName) == false) {
-      throw new NamespaceNotFoundException(namespaceName);
+      setFailure("master-delete-namespace", new NamespaceNotFoundException(namespaceName));
+      return false;
     }
     if (NamespaceDescriptor.RESERVED_NAMESPACES.contains(namespaceName)) {
-      throw new ConstraintException("Reserved namespace "+ namespaceName +" cannot be removed.");
+      setFailure("master-delete-namespace", new ConstraintException(
+          "Reserved namespace "+ namespaceName +" cannot be removed."));
+      return false;
     }
 
     int tableCount = 0;
     try {
       tableCount = env.getMasterServices().listTableDescriptorsByNamespace(namespaceName).size();
     } catch (FileNotFoundException fnfe) {
-      throw new NamespaceNotFoundException(namespaceName);
+      setFailure("master-delete-namespace", new NamespaceNotFoundException(namespaceName));
+      return false;
     }
     if (tableCount > 0) {
-      throw new ConstraintException("Only empty namespaces can be removed. " +
-          "Namespace "+ namespaceName + " has "+ tableCount +" tables");
+      setFailure("master-delete-namespace", new ConstraintException(
+          "Only empty namespaces can be removed. Namespace "+ namespaceName + " has "
+          + tableCount +" tables"));
+      return false;
     }
 
     // This is used for rollback
     nsDescriptor = getTableNamespaceManager(env).get(namespaceName);
+    return true;
   }
 
   /**

@@ -34,6 +34,7 @@ import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.NoTagsByteBufferKeyValue;
 import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.ByteBufferKeyValue;
@@ -275,8 +276,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
               // next header, will not have happened...so, pass in the onDiskSize gotten from the
               // cached block. This 'optimization' triggers extremely rarely I'd say.
               long onDiskSize = prevBlock != null? prevBlock.getNextBlockOnDiskSize(): -1;
-              HFileBlock block = readBlock(offset, onDiskSize, true, false, false, false,
-                  null, null);
+              HFileBlock block = readBlock(offset, onDiskSize, /*cacheBlock=*/true,
+                  /*pread=*/true, false, false, null, null);
               // Need not update the current block. Ideally here the readBlock won't find the
               // block in cache. We call this readBlock so that block data is read from FS and
               // cached in BC. So there is no reference count increment that happens here.
@@ -330,14 +331,14 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
     // We can read v3 or v2 versions of hfile.
     throw new IllegalArgumentException("Invalid HFile version: major=" +
       trailer.getMajorVersion() + ", minor=" + trailer.getMinorVersion() + ": expected at least " +
-      "major=2 and minor=" + MAX_MINOR_VERSION);
+      "major=2 and minor=" + MAX_MINOR_VERSION + ", path=" + path);
   }
 
   @SuppressWarnings("serial")
   public static class BlockIndexNotLoadedException extends IllegalStateException {
-    public BlockIndexNotLoadedException() {
+    public BlockIndexNotLoadedException(Path path) {
       // Add a message in case anyone relies on it as opposed to class name.
-      super("Block index not loaded");
+      super(path + " block index not loaded");
     }
   }
 
@@ -370,13 +371,16 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
 
   @Override
   public void returnBlock(HFileBlock block) {
-    BlockCache blockCache = this.cacheConf.getBlockCache();
-    if (blockCache != null && block != null) {
-      BlockCacheKey cacheKey = new BlockCacheKey(this.getFileContext().getHFileName(),
-          block.getOffset(), this.isPrimaryReplicaReader(), block.getBlockType());
-      blockCache.returnBlock(cacheKey, block);
+    if (block != null) {
+      this.cacheConf.getBlockCache().ifPresent(blockCache -> {
+        BlockCacheKey cacheKey =
+            new BlockCacheKey(this.getFileContext().getHFileName(), block.getOffset(),
+                this.isPrimaryReplicaReader(), block.getBlockType());
+        blockCache.returnBlock(cacheKey, block);
+      });
     }
   }
+
   /**
    * @return the first key in the file. May be null if file has no entries. Note
    *         that this is not the first row key, but rather the byte form of the
@@ -385,7 +389,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
   @Override
   public Optional<Cell> getFirstKey() {
     if (dataBlockIndexReader == null) {
-      throw new BlockIndexNotLoadedException();
+      throw new BlockIndexNotLoadedException(path);
     }
     return dataBlockIndexReader.isEmpty() ? Optional.empty()
         : Optional.of(dataBlockIndexReader.getRootBlockKey(0));
@@ -475,8 +479,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
    */
   @SuppressWarnings("serial")
   public static class NotSeekedException extends IllegalStateException {
-    public NotSeekedException() {
-      super("Not seeked to a key/value");
+    public NotSeekedException(Path path) {
+      super(path + " not seeked to a key/value");
     }
   }
 
@@ -568,7 +572,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
 
     protected void assertSeeked() {
       if (!isSeeked())
-        throw new NotSeekedException();
+        throw new NotSeekedException(reader.getPath());
     }
 
     @Override
@@ -638,7 +642,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
         throw new IllegalStateException("Invalid currTagsLen " + this.currTagsLen +
           ". Block offset: " + curBlock.getOffset() + ", block length: " +
             this.blockBuffer.limit() +
-          ", position: " + this.blockBuffer.position() + " (without header).");
+          ", position: " + this.blockBuffer.position() + " (without header)." +
+          " path=" + reader.getPath());
       }
     }
 
@@ -725,7 +730,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
           throw new IllegalStateException("Invalid klen " + klen + " or vlen "
               + vlen + ". Block offset: "
               + curBlock.getOffset() + ", block length: " + blockBuffer.limit() + ", position: "
-              + blockBuffer.position() + " (without header).");
+              + blockBuffer.position() + " (without header)."
+              + " path=" + reader.getPath());
         }
         offsetFromPos += Bytes.SIZEOF_LONG;
         blockBuffer.asSubByteBuffer(blockBuffer.position() + offsetFromPos, klen, pair);
@@ -740,7 +746,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
           if (checkLen(tlen)) {
             throw new IllegalStateException("Invalid tlen " + tlen + ". Block offset: "
                 + curBlock.getOffset() + ", block length: " + blockBuffer.limit() + ", position: "
-                + blockBuffer.position() + " (without header).");
+                + blockBuffer.position() + " (without header)."
+                + " path=" + reader.getPath());
           }
           // add the two bytes read for the tags.
           offsetFromPos += tlen + (Bytes.SIZEOF_SHORT);
@@ -755,7 +762,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
               throw new IllegalStateException("blockSeek with seekBefore "
                   + "at the first key of the block: key=" + CellUtil.getCellKeyAsString(key)
                   + ", blockOffset=" + curBlock.getOffset() + ", onDiskSize="
-                  + curBlock.getOnDiskSizeWithHeader());
+                  + curBlock.getOnDiskSizeWithHeader()
+                  + ", path=" + reader.getPath());
             }
             blockBuffer.moveBack(lastKeyValueSize);
             readKeyValueLen();
@@ -918,7 +926,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
         }
 
         if (block.getOffset() < 0) {
-          throw new IOException("Invalid block file offset: " + block);
+          throw new IOException(
+              "Invalid block file offset: " + block + ", path=" + reader.getPath());
         }
 
         // We are reading the next block without block type validation, because
@@ -964,7 +973,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
       } else {
         ByteBuffer buf = blockBuffer.asSubByteBuffer(cellBufSize);
         if (buf.isDirect()) {
-          ret = new ByteBufferKeyValue(buf, buf.position(), cellBufSize, seqId);
+          ret = currTagsLen > 0 ? new ByteBufferKeyValue(buf, buf.position(), cellBufSize, seqId)
+              : new NoTagsByteBufferKeyValue(buf, buf.position(), cellBufSize, seqId);
         } else {
           if (currTagsLen > 0) {
             ret = new SizeCachedKeyValue(buf.array(), buf.arrayOffset() + buf.position(),
@@ -1032,8 +1042,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
         LOG.error("Current pos = " + blockBuffer.position()
             + "; currKeyLen = " + currKeyLen + "; currValLen = "
             + currValueLen + "; block limit = " + blockBuffer.limit()
-            + "; HFile name = " + reader.getName()
-            + "; currBlock currBlockOffset = " + this.curBlock.getOffset());
+            + "; currBlock currBlockOffset = " + this.curBlock.getOffset()
+            + "; path=" + reader.getPath());
         throw e;
       }
     }
@@ -1131,7 +1141,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
       HFileBlock newBlock = reader.readBlock(firstDataBlockOffset, -1, cacheBlocks, pread,
           isCompaction, true, BlockType.DATA, getEffectiveDataBlockEncoding());
       if (newBlock.getOffset() < 0) {
-        throw new IOException("Invalid block offset: " + newBlock.getOffset());
+        throw new IOException(
+            "Invalid block offset: " + newBlock.getOffset() + ", path=" + reader.getPath());
       }
       updateCurrentBlock(newBlock);
     }
@@ -1175,7 +1186,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
             + " or currValueLen " + this.currValueLen + ". Block offset: "
             + this.curBlock.getOffset() + ", block length: "
             + this.blockBuffer.limit() + ", position: " + this.blockBuffer.position()
-            + " (without header).");
+            + " (without header)." + ", path=" + reader.getPath());
       }
     }
 
@@ -1190,7 +1201,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
       // sanity check
       if (newBlock.getBlockType() != BlockType.DATA) {
         throw new IllegalStateException("ScannerV2 works only on data " + "blocks, got "
-            + newBlock.getBlockType() + "; " + "fileName=" + reader.getName()
+            + newBlock.getBlockType() + "; " + "HFileName=" + reader.getPath()
             + ", " + "dataBlockEncoder=" + reader.getDataBlockEncoding() + ", " + "isCompaction="
             + isCompaction);
       }
@@ -1293,69 +1304,68 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
    * Retrieve block from cache. Validates the retrieved block's type vs {@code expectedBlockType}
    * and its encoding vs. {@code expectedDataBlockEncoding}. Unpacks the block as necessary.
    */
-   private HFileBlock getCachedBlock(BlockCacheKey cacheKey, boolean cacheBlock, boolean useLock,
-       boolean isCompaction, boolean updateCacheMetrics, BlockType expectedBlockType,
-       DataBlockEncoding expectedDataBlockEncoding) throws IOException {
-     // Check cache for block. If found return.
-     if (cacheConf.isBlockCacheEnabled()) {
-       BlockCache cache = cacheConf.getBlockCache();
-       HFileBlock cachedBlock = (HFileBlock) cache.getBlock(cacheKey, cacheBlock, useLock,
-         updateCacheMetrics);
-       if (cachedBlock != null) {
-         if (cacheConf.shouldCacheCompressed(cachedBlock.getBlockType().getCategory())) {
-           HFileBlock compressedBlock = cachedBlock;
-           cachedBlock = compressedBlock.unpack(hfileContext, fsBlockReader);
-           // In case of compressed block after unpacking we can return the compressed block
+  private HFileBlock getCachedBlock(BlockCacheKey cacheKey, boolean cacheBlock, boolean useLock,
+      boolean isCompaction, boolean updateCacheMetrics, BlockType expectedBlockType,
+      DataBlockEncoding expectedDataBlockEncoding) throws IOException {
+    // Check cache for block. If found return.
+    BlockCache cache = cacheConf.getBlockCache().orElse(null);
+    if (cache != null) {
+      HFileBlock cachedBlock =
+          (HFileBlock) cache.getBlock(cacheKey, cacheBlock, useLock, updateCacheMetrics);
+      if (cachedBlock != null) {
+        if (cacheConf.shouldCacheCompressed(cachedBlock.getBlockType().getCategory())) {
+          HFileBlock compressedBlock = cachedBlock;
+          cachedBlock = compressedBlock.unpack(hfileContext, fsBlockReader);
+          // In case of compressed block after unpacking we can return the compressed block
           if (compressedBlock != cachedBlock) {
             cache.returnBlock(cacheKey, compressedBlock);
           }
         }
-         validateBlockType(cachedBlock, expectedBlockType);
+        validateBlockType(cachedBlock, expectedBlockType);
 
-         if (expectedDataBlockEncoding == null) {
-           return cachedBlock;
-         }
-         DataBlockEncoding actualDataBlockEncoding =
-                 cachedBlock.getDataBlockEncoding();
-         // Block types other than data blocks always have
-         // DataBlockEncoding.NONE. To avoid false negative cache misses, only
-         // perform this check if cached block is a data block.
-         if (cachedBlock.getBlockType().isData() &&
-                 !actualDataBlockEncoding.equals(expectedDataBlockEncoding)) {
-           // This mismatch may happen if a Scanner, which is used for say a
-           // compaction, tries to read an encoded block from the block cache.
-           // The reverse might happen when an EncodedScanner tries to read
-           // un-encoded blocks which were cached earlier.
-           //
-           // Because returning a data block with an implicit BlockType mismatch
-           // will cause the requesting scanner to throw a disk read should be
-           // forced here. This will potentially cause a significant number of
-           // cache misses, so update so we should keep track of this as it might
-           // justify the work on a CompoundScanner.
-           if (!expectedDataBlockEncoding.equals(DataBlockEncoding.NONE) &&
-                   !actualDataBlockEncoding.equals(DataBlockEncoding.NONE)) {
-             // If the block is encoded but the encoding does not match the
-             // expected encoding it is likely the encoding was changed but the
-             // block was not yet evicted. Evictions on file close happen async
-             // so blocks with the old encoding still linger in cache for some
-             // period of time. This event should be rare as it only happens on
-             // schema definition change.
-             LOG.info("Evicting cached block with key " + cacheKey +
-                     " because of a data block encoding mismatch" +
-                     "; expected: " + expectedDataBlockEncoding +
-                     ", actual: " + actualDataBlockEncoding);
-             // This is an error scenario. so here we need to decrement the
-             // count.
-             cache.returnBlock(cacheKey, cachedBlock);
-             cache.evictBlock(cacheKey);
-           }
-           return null;
-         }
-         return cachedBlock;
-       }
-     }
-     return null;
-   }
+        if (expectedDataBlockEncoding == null) {
+          return cachedBlock;
+        }
+        DataBlockEncoding actualDataBlockEncoding = cachedBlock.getDataBlockEncoding();
+        // Block types other than data blocks always have
+        // DataBlockEncoding.NONE. To avoid false negative cache misses, only
+        // perform this check if cached block is a data block.
+        if (cachedBlock.getBlockType().isData() &&
+            !actualDataBlockEncoding.equals(expectedDataBlockEncoding)) {
+          // This mismatch may happen if a Scanner, which is used for say a
+          // compaction, tries to read an encoded block from the block cache.
+          // The reverse might happen when an EncodedScanner tries to read
+          // un-encoded blocks which were cached earlier.
+          //
+          // Because returning a data block with an implicit BlockType mismatch
+          // will cause the requesting scanner to throw a disk read should be
+          // forced here. This will potentially cause a significant number of
+          // cache misses, so update so we should keep track of this as it might
+          // justify the work on a CompoundScanner.
+          if (!expectedDataBlockEncoding.equals(DataBlockEncoding.NONE) &&
+              !actualDataBlockEncoding.equals(DataBlockEncoding.NONE)) {
+            // If the block is encoded but the encoding does not match the
+            // expected encoding it is likely the encoding was changed but the
+            // block was not yet evicted. Evictions on file close happen async
+            // so blocks with the old encoding still linger in cache for some
+            // period of time. This event should be rare as it only happens on
+            // schema definition change.
+            LOG.info("Evicting cached block with key " + cacheKey
+                + " because of a data block encoding mismatch" + "; expected: "
+                + expectedDataBlockEncoding + ", actual: " + actualDataBlockEncoding + ", path="
+                + path);
+            // This is an error scenario. so here we need to decrement the
+            // count.
+            cache.returnBlock(cacheKey, cachedBlock);
+            cache.evictBlock(cacheKey);
+          }
+          return null;
+        }
+        return cachedBlock;
+      }
+    }
+    return null;
+  }
 
   /**
    * @param metaBlockName
@@ -1370,7 +1380,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
       return null; // there are no meta blocks
     }
     if (metaBlockIndexReader == null) {
-      throw new IOException("Meta index not loaded");
+      throw new IOException(path + " meta index not loaded");
     }
 
     byte[] mbname = Bytes.toBytes(metaBlockName);
@@ -1391,26 +1401,24 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
         this.isPrimaryReplicaReader(), BlockType.META);
 
       cacheBlock &= cacheConf.shouldCacheBlockOnRead(BlockType.META.getCategory());
-      if (cacheConf.isBlockCacheEnabled()) {
-        HFileBlock cachedBlock = getCachedBlock(cacheKey, cacheBlock, false, true, true,
-          BlockType.META, null);
-        if (cachedBlock != null) {
-          assert cachedBlock.isUnpacked() : "Packed block leak.";
-          // Return a distinct 'shallow copy' of the block,
-          // so pos does not get messed by the scanner
-          return cachedBlock;
-        }
-        // Cache Miss, please load.
+      HFileBlock cachedBlock =
+          getCachedBlock(cacheKey, cacheBlock, false, true, true, BlockType.META, null);
+      if (cachedBlock != null) {
+        assert cachedBlock.isUnpacked() : "Packed block leak.";
+        // Return a distinct 'shallow copy' of the block,
+        // so pos does not get messed by the scanner
+        return cachedBlock;
       }
+      // Cache Miss, please load.
 
       HFileBlock metaBlock = fsBlockReader.readBlockData(metaBlockOffset, blockSize, true, false).
           unpack(hfileContext, fsBlockReader);
 
       // Cache the block
       if (cacheBlock) {
-        cacheConf.getBlockCache().cacheBlock(cacheKey, metaBlock, cacheConf.isInMemory());
+        cacheConf.getBlockCache()
+            .ifPresent(cache -> cache.cacheBlock(cacheKey, metaBlock, cacheConf.isInMemory()));
       }
-
       return metaBlock;
     }
   }
@@ -1422,13 +1430,14 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
       DataBlockEncoding expectedDataBlockEncoding)
       throws IOException {
     if (dataBlockIndexReader == null) {
-      throw new IOException("Block index not loaded");
+      throw new IOException(path + " block index not loaded");
     }
     long trailerOffset = trailer.getLoadOnOpenDataOffset();
     if (dataBlockOffset < 0 || dataBlockOffset >= trailerOffset) {
       throw new IOException("Requested block is out of range: " + dataBlockOffset +
         ", lastDataBlockOffset: " + trailer.getLastDataBlockOffset() +
-        ", trailer.getLoadOnOpenDataOffset: " + trailerOffset);
+        ", trailer.getLoadOnOpenDataOffset: " + trailerOffset +
+        ", path=" + path);
     }
     // For any given block from any given file, synchronize reads for said
     // block.
@@ -1467,7 +1476,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
               if (cachedBlock.getDataBlockEncoding() != dataBlockEncoder.getDataBlockEncoding()) {
                 throw new IOException("Cached block under key " + cacheKey + " "
                   + "has wrong encoding: " + cachedBlock.getDataBlockEncoding() + " (expected: "
-                  + dataBlockEncoder.getDataBlockEncoding() + ")");
+                  + dataBlockEncoder.getDataBlockEncoding() + ")"
+                  + ", path=" + path);
               }
             }
             // Cache-hit. Return!
@@ -1491,11 +1501,13 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
         BlockType.BlockCategory category = hfileBlock.getBlockType().getCategory();
 
         // Cache the block if necessary
-        if (cacheBlock && cacheConf.shouldCacheBlockOnRead(category)) {
-          cacheConf.getBlockCache().cacheBlock(cacheKey,
-            cacheConf.shouldCacheCompressed(category) ? hfileBlock : unpacked,
-            cacheConf.isInMemory());
-        }
+        cacheConf.getBlockCache().ifPresent(cache -> {
+          if (cacheBlock && cacheConf.shouldCacheBlockOnRead(category)) {
+            cache.cacheBlock(cacheKey,
+                cacheConf.shouldCacheCompressed(category) ? hfileBlock : unpacked,
+                cacheConf.isInMemory());
+          }
+        });
 
         if (updateCacheMetrics && hfileBlock.getBlockType().isData()) {
           HFile.DATABLOCK_READ_COUNT.increment();
@@ -1537,7 +1549,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
     }
     if (actualBlockType != expectedBlockType) {
       throw new IOException("Expected block type " + expectedBlockType + ", " +
-          "but got " + actualBlockType + ": " + block);
+          "but got " + actualBlockType + ": " + block + ", path=" + path);
     }
   }
 
@@ -1569,13 +1581,14 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
   @Override
   public void close(boolean evictOnClose) throws IOException {
     PrefetchExecutor.cancel(path);
-    if (evictOnClose && cacheConf.isBlockCacheEnabled()) {
-      int numEvicted = cacheConf.getBlockCache().evictBlocksByHfileName(name);
-      if (LOG.isTraceEnabled()) {
-        LOG.trace("On close, file=" + name + " evicted=" + numEvicted
-          + " block(s)");
+    cacheConf.getBlockCache().ifPresent(cache -> {
+      if (evictOnClose) {
+        int numEvicted = cache.evictBlocksByHfileName(name);
+        if (LOG.isTraceEnabled()) {
+          LOG.trace("On close, file=" + name + " evicted=" + numEvicted + " block(s)");
+        }
       }
-    }
+    });
     fsBlockReader.closeStreams();
   }
 
@@ -1637,7 +1650,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
         String encoderCls = dataBlockEncoder.getClass().getName();
         throw new CorruptHFileException("Encoder " + encoderCls
           + " doesn't support data block encoding "
-          + DataBlockEncoding.getNameFromId(dataBlockEncoderId));
+          + DataBlockEncoding.getNameFromId(dataBlockEncoderId)
+          + ", path=" + reader.getPath());
       }
       updateCurrBlockRef(newBlock);
       ByteBuff encodedBuffer = getEncodedBuffer(newBlock);
@@ -1711,7 +1725,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
 
     private void assertValidSeek() {
       if (this.curBlock == null) {
-        throw new NotSeekedException();
+        throw new NotSeekedException(reader.getPath());
       }
     }
 
@@ -1758,7 +1772,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
     if (blockType != BlockType.GENERAL_BLOOM_META &&
         blockType != BlockType.DELETE_FAMILY_BLOOM_META) {
       throw new RuntimeException("Block Type: " + blockType.toString() +
-          " is not supported") ;
+          " is not supported, path=" + path) ;
     }
 
     for (HFileBlock b : loadOnOpenBlocks)
@@ -1803,7 +1817,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
       // Use the algorithm the key wants
       Cipher cipher = Encryption.getCipher(conf, key.getAlgorithm());
       if (cipher == null) {
-        throw new IOException("Cipher '" + key.getAlgorithm() + "' is not available");
+        throw new IOException("Cipher '" + key.getAlgorithm() + "' is not available"
+            + ", path=" + path);
       }
       cryptoContext.setCipher(cipher);
       cryptoContext.setKey(key);

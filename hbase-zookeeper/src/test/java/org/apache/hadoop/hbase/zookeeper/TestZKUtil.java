@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hbase.zookeeper;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -32,6 +33,7 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.ZKTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hadoop.hbase.zookeeper.ZKUtil.ZKUtilOp;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooDefs;
@@ -46,11 +48,11 @@ import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableList;
 import org.apache.hbase.thirdparty.com.google.common.io.Closeables;
 
 @Category({ ZKTests.class, MediumTests.class })
 public class TestZKUtil {
-
   @ClassRule
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestZKUtil.class);
@@ -66,7 +68,6 @@ public class TestZKUtil {
     UTIL.startMiniZKCluster().getClientPort();
     ZKW = new ZKWatcher(new Configuration(UTIL.getConfiguration()), TestZKUtil.class.getName(),
         new WarnOnlyAbortable());
-
   }
 
   @AfterClass
@@ -117,6 +118,28 @@ public class TestZKUtil {
     assertNull(ZKUtil.getDataNoWatch(ZKW, "/l1/l2", null));
   }
 
+  private int getZNodeDataVersion(String znode) throws KeeperException {
+    Stat stat = new Stat();
+    ZKUtil.getDataNoWatch(ZKW, znode, stat);
+    return stat.getVersion();
+  }
+
+  @Test
+  public void testSetDataWithVersion() throws Exception {
+    ZKUtil.createWithParents(ZKW, "/s1/s2/s3");
+    int v0 = getZNodeDataVersion("/s1/s2/s3");
+    assertEquals(0, v0);
+
+    ZKUtil.setData(ZKW, "/s1/s2/s3", Bytes.toBytes(12L));
+    int v1 = getZNodeDataVersion("/s1/s2/s3");
+    assertEquals(1, v1);
+
+    ZKUtil.multiOrSequential(ZKW,
+      ImmutableList.of(ZKUtilOp.setData("/s1/s2/s3", Bytes.toBytes(13L), v1)), false);
+    int v2 = getZNodeDataVersion("/s1/s2/s3");
+    assertEquals(2, v2);
+  }
+
   /**
    * A test for HBASE-3238
    * @throws IOException A connection attempt to zk failed
@@ -135,8 +158,8 @@ public class TestZKUtil {
     zk.addAuthInfo("digest", "hbase:rox".getBytes());
 
     // Save the previous ACL
-    Stat s = null;
-    List<ACL> oldACL = null;
+    Stat s;
+    List<ACL> oldACL;
     while (true) {
       try {
         s = new Stat();

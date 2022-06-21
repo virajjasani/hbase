@@ -34,7 +34,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
+import org.apache.hadoop.hbase.CallQueueTooBigException;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.NotServingRegionException;
@@ -49,9 +49,11 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
-import org.apache.hbase.thirdparty.io.netty.util.HashedWheelTimer;
 import org.apache.hbase.thirdparty.io.netty.util.Timeout;
+import org.apache.hbase.thirdparty.io.netty.util.Timer;
+
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
 import org.apache.hadoop.hbase.shaded.protobuf.ResponseConverter;
@@ -72,7 +74,7 @@ class AsyncScanSingleRegionRpcRetryingCaller {
   private static final Logger LOG =
       LoggerFactory.getLogger(AsyncScanSingleRegionRpcRetryingCaller.class);
 
-  private final HashedWheelTimer retryTimer;
+  private final Timer retryTimer;
 
   private final Scan scan;
 
@@ -90,9 +92,13 @@ class AsyncScanSingleRegionRpcRetryingCaller {
 
   private final boolean regionServerRemote;
 
+  private final int priority;
+
   private final long scannerLeaseTimeoutPeriodNs;
 
   private final long pauseNs;
+
+  private final long pauseForCQTBENs;
 
   private final int maxAttempts;
 
@@ -297,11 +303,12 @@ class AsyncScanSingleRegionRpcRetryingCaller {
     }
   }
 
-  public AsyncScanSingleRegionRpcRetryingCaller(HashedWheelTimer retryTimer,
-      AsyncConnectionImpl conn, Scan scan, ScanMetrics scanMetrics, long scannerId,
-      ScanResultCache resultCache, AdvancedScanResultConsumer consumer, Interface stub,
-      HRegionLocation loc, boolean isRegionServerRemote, long scannerLeaseTimeoutPeriodNs,
-      long pauseNs, int maxAttempts, long scanTimeoutNs, long rpcTimeoutNs, int startLogErrorsCnt) {
+  public AsyncScanSingleRegionRpcRetryingCaller(Timer retryTimer, AsyncConnectionImpl conn,
+      Scan scan, ScanMetrics scanMetrics, long scannerId, ScanResultCache resultCache,
+      AdvancedScanResultConsumer consumer, Interface stub, HRegionLocation loc,
+      boolean isRegionServerRemote, int priority, long scannerLeaseTimeoutPeriodNs, long pauseNs,
+      long pauseForCQTBENs, int maxAttempts, long scanTimeoutNs, long rpcTimeoutNs,
+      int startLogErrorsCnt) {
     this.retryTimer = retryTimer;
     this.scan = scan;
     this.scanMetrics = scanMetrics;
@@ -313,6 +320,7 @@ class AsyncScanSingleRegionRpcRetryingCaller {
     this.regionServerRemote = isRegionServerRemote;
     this.scannerLeaseTimeoutPeriodNs = scannerLeaseTimeoutPeriodNs;
     this.pauseNs = pauseNs;
+    this.pauseForCQTBENs = pauseForCQTBENs;
     this.maxAttempts = maxAttempts;
     this.scanTimeoutNs = scanTimeoutNs;
     this.rpcTimeoutNs = rpcTimeoutNs;
@@ -323,7 +331,9 @@ class AsyncScanSingleRegionRpcRetryingCaller {
       completeWhenNoMoreResultsInRegion = this::completeWhenNoMoreResultsInRegion;
     }
     this.future = new CompletableFuture<>();
+    this.priority = priority;
     this.controller = conn.rpcControllerFactory.newController();
+    this.controller.setPriority(priority);
     this.exceptions = new ArrayList<>();
   }
 
@@ -337,7 +347,7 @@ class AsyncScanSingleRegionRpcRetryingCaller {
 
   private void closeScanner() {
     incRPCCallsMetrics(scanMetrics, regionServerRemote);
-    resetController(controller, rpcTimeoutNs);
+    resetController(controller, rpcTimeoutNs, priority);
     ScanRequest req = RequestConverter.buildScanRequest(this.scannerId, 0, true, false);
     stub.scan(controller, req, resp -> {
       if (controller.failed()) {
@@ -388,32 +398,34 @@ class AsyncScanSingleRegionRpcRetryingCaller {
           " ms",
         error);
     }
-    boolean scannerClosed = error instanceof UnknownScannerException ||
-        error instanceof NotServingRegionException || error instanceof RegionServerStoppedException;
+    boolean scannerClosed =
+      error instanceof UnknownScannerException || error instanceof NotServingRegionException ||
+        error instanceof RegionServerStoppedException || error instanceof ScannerResetException;
     RetriesExhaustedException.ThrowableWithExtraContext qt =
-        new RetriesExhaustedException.ThrowableWithExtraContext(error,
-            EnvironmentEdgeManager.currentTime(), "");
+      new RetriesExhaustedException.ThrowableWithExtraContext(error,
+        EnvironmentEdgeManager.currentTime(), "");
     exceptions.add(qt);
     if (tries >= maxAttempts) {
       completeExceptionally(!scannerClosed);
       return;
     }
     long delayNs;
+    long pauseNsToUse = error instanceof CallQueueTooBigException ? pauseForCQTBENs : pauseNs;
     if (scanTimeoutNs > 0) {
       long maxDelayNs = remainingTimeNs() - SLEEP_DELTA_NS;
       if (maxDelayNs <= 0) {
         completeExceptionally(!scannerClosed);
         return;
       }
-      delayNs = Math.min(maxDelayNs, getPauseTime(pauseNs, tries - 1));
+      delayNs = Math.min(maxDelayNs, getPauseTime(pauseNsToUse, tries - 1));
     } else {
-      delayNs = getPauseTime(pauseNs, tries - 1);
+      delayNs = getPauseTime(pauseNsToUse, tries - 1);
     }
     if (scannerClosed) {
       completeWhenError(false);
       return;
     }
-    if (error instanceof OutOfOrderScannerNextException || error instanceof ScannerResetException) {
+    if (error instanceof OutOfOrderScannerNextException) {
       completeWhenError(true);
       return;
     }
@@ -557,9 +569,9 @@ class AsyncScanSingleRegionRpcRetryingCaller {
     if (tries > 1) {
       incRPCRetriesMetrics(scanMetrics, regionServerRemote);
     }
-    resetController(controller, callTimeoutNs);
+    resetController(controller, callTimeoutNs, priority);
     ScanRequest req = RequestConverter.buildScanRequest(scannerId, scan.getCaching(), false,
-      nextCallSeq, false, false, scan.getLimit());
+      nextCallSeq, scan.isScanMetricsEnabled(), false, scan.getLimit());
     stub.scan(controller, req, resp -> onComplete(controller, resp));
   }
 
@@ -574,7 +586,7 @@ class AsyncScanSingleRegionRpcRetryingCaller {
   private void renewLease() {
     incRPCCallsMetrics(scanMetrics, regionServerRemote);
     nextCallSeq++;
-    resetController(controller, rpcTimeoutNs);
+    resetController(controller, rpcTimeoutNs, priority);
     ScanRequest req =
         RequestConverter.buildScanRequest(scannerId, 0, false, nextCallSeq, false, true, -1);
     stub.scan(controller, req, resp -> {

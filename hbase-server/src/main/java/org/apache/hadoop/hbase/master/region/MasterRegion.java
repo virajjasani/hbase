@@ -147,9 +147,11 @@ public final class MasterRegion {
     try {
       action.update(region);
       flusherAndCompactor.onUpdate();
-    } catch (WALSyncTimeoutIOException e) {
-      LOG.error(HBaseMarkers.FATAL, "WAL sync timeout. Aborting server.");
-      server.abort("WAL sync timeout", e);
+    } catch (IOException e) {
+      LOG.error(HBaseMarkers.FATAL,
+        "MasterRegion mutation is not successful. Aborting server to let new active master "
+          + "resume failed proc store update.");
+      server.abort("MasterRegion mutation is not successful", e);
       throw e;
     }
   }
